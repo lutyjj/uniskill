@@ -1,0 +1,10 @@
+# uniskill configuration
+# Place this at ~/.config/uniskill/config.toml or pass --config
+
+[[bundles]]
+source = "$HOME/.dotfiles/skills"
+harnesses = ["pi", "claude-code"]
+
+[harnesses.my-custom-harness]
+label = "My Custom Harness"
+pattern = "/custom/path/skills/{name}"

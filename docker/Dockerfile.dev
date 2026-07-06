@@ -1,0 +1,10 @@
+FROM rust:1.85-slim
+
+WORKDIR /src
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends jq curl git && \
+    rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT ["cargo"]
+CMD ["--help"]
