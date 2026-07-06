@@ -36,6 +36,7 @@ pub fn default_harnesses() -> HashMap<String, HarnessDef> {
 }
 
 /// Find a harness by name. Returns None if unknown.
+#[allow(dead_code)]
 pub fn find_harness<'a>(name: &'a str, registry: &'a HashMap<String, HarnessDef>) -> Option<&'a HarnessDef> {
     registry.get(name)
 }

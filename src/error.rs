@@ -8,15 +8,23 @@ pub enum AppError {
     #[error("invalid config: {0}")]
     ConfigParse(#[from] toml::de::Error),
 
+    /// Unused today — reserved for `uniskill status` (documented, not yet implemented).
+    #[allow(dead_code)]
     #[error("unknown harness '{name}' — add it to the [harnesses] section")]
     UnknownHarness { name: String },
 
+    /// Unused today — reserved for `uniskill status`.
+    #[allow(dead_code)]
     #[error("broken symlink at {path}: target no longer exists")]
     BrokenSymlink { path: String },
 
+    /// Unused today — reserved for `uniskill status`.
+    #[allow(dead_code)]
     #[error("conflict: {path} exists and is not a symlink")]
     PathConflict { path: String },
 
+    /// Unused today — reserved for `uniskill status`.
+    #[allow(dead_code)]
     #[error("symlink failed: {path} → {target}: {reason}")]
     SymlinkFailed {
         path: String,

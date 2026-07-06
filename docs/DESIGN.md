@@ -2,6 +2,8 @@
 
 uniskill wires skill bundles from their source directory into multiple agent harnesses via symlinks. One bundle, installed to whatever harnesses you declare. The tool handles path resolution automatically.
 
+> See [USER_JOURNEY.md](file:///Users/lutyjj/workplace/i-hate-agents-md/docs/USER_JOURNEY.md) for concrete examples of global, project-level, and custom harness workflows.
+
 ## Scope
 
 uniskill manages **skill bundles**. A bundle is a self-contained directory with a `meta.toml` and a `skills/` subdirectory. The tool reads the bundle, discovers its skills, and creates symlinks at each harness's expected location.
@@ -53,38 +55,53 @@ The tool creates symlinks:
 
 Different harnesses use different conventions. The tool knows each harness's expected path pattern and resolves it at runtime using environment variables like `$HOME`.
 
-## Harness registry
+## Harness definitions & Scopes
 
-The harness registry maps harness names to installation patterns. Each entry defines where that harness expects skills:
+A harness defines where a particular agent expects its skills to live. Instead of a hardcoded registry, harnesses are configured dynamically. `uniskill` ships with built-in defaults for known global harnesses, but users can extend or override them.
 
-```toml
-[harnesses.pi]
-name = "pi"
-skill_dir_pattern = "$HOME/.agents/skills/{name}"
+The critical concept is **Scope**:
+- **Global**: The harness operates system-wide (e.g., its path pattern is absolute, typically rooted in `$HOME`).
+- **Project**: The harness operates only within a specific repository (e.g., its path pattern is relative to the project root, like `.claude/skills`).
 
-[harnesses.claude-code]
-name = "claude-code"
-skill_dir_pattern = "$HOME/.claude/skills/{name}"
-```
-
-Adding a new harness requires updating this registry, not the bundle definition. The pattern supports `{name}` as a placeholder for the skill name and `$VAR` / `${VAR}` for environment variables.
-
-## Config format
-
-The config file lives at `~/.config/uniskill/config.toml`. Users can place it elsewhere and pass `--config`.
+Users can define custom harnesses directly in their configuration files:
 
 ```toml
-# Required: bundles to wire into harnesses
-[[bundles]]
-source = "/home/user/repos/my-skills"
-harnesses = ["pi", "claude-code"]
+[harnesses.company-agent]
+scope = "global"
+pattern = "$HOME/.company-agent/skills/{name}"
 
-[[bundles]]
-source = "/home/user/repos/other-skills"
-harnesses = ["codex"]
+[harnesses.local-claude]
+scope = "project"
+pattern = ".claude/skills/{name}"
 ```
 
-The `source` field points to a bundle directory. Currently supports local filesystem paths only. Git repo support may come later.
+## Config format & Resolution
+
+Configuration is merged from two layers, allowing seamless interaction between global tools and project-specific agents:
+
+1. **Global Config**: `~/.config/uniskill/config.toml` (or `--config`)
+2. **Project Config**: `uniskill.toml` in the current working directory.
+
+```toml
+# Example uniskill.toml (can be global or project-level)
+
+# Define custom harnesses (optional)
+[harnesses.my-custom-harness]
+scope = "project"
+pattern = ".agents/skills/{name}"
+
+# Wire bundles into harnesses
+[[bundles]]
+source = "./my-project-skills" # Resolves relative to this config file
+harnesses = ["pi", "my-custom-harness"] # 'pi' is a built-in global
+```
+
+When `uniskill sync` runs, it:
+1. Loads the built-in default harnesses.
+2. Loads and merges user-defined harnesses from the Global Config.
+3. Loads and merges user-defined harnesses from the Project Config (if present).
+4. Resolves the `source` paths (absolute or relative to the defining config).
+5. Creates symlinks for all declared bundles across all scopes.
 
 The tool auto-discovers skills from the `skills/` subdirectory of each source. No per-skill configuration needed.
 
