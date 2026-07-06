@@ -1,11 +1,11 @@
-# Project-level uniskill config — isolated from global harnesses.
-# Installs this repo's own skill bundle into a local, scoped harness.
+# Project-level uniskill config — installs dev skills locally.
+# Demonstrates self-hosting: we use our own tool to wire our own workflow.
 
-[harnesses.local-agent]
-label = "Local Agent"
+[harnesses.dev]
+label = "Dev Harness"
 scope = "project"
-pattern = ".local-skills/agent/{name}"
+pattern = ".dev-skills/{name}"
 
 [[bundles]]
-source = "./samples/skills-bundle"
-harnesses = ["local-agent"]
+source = "./uniskill-bundle"
+harnesses = ["dev"]

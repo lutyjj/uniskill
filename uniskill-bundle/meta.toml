@@ -1,0 +1,3 @@
+name = "uniskill-dev-bundle"
+type = "skill"
+description = "Development workflow skills for uniskill — the skill bundle wiring tool itself"
