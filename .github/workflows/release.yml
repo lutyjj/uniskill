@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: darwin-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create tarball
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/uniskill staging/
+          tar czf uniskill-${{ matrix.name }}.tar.gz -C staging uniskill
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: uniskill-${{ matrix.name }}
+          path: uniskill-${{ matrix.name }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          # Use tag name if triggered by tag, otherwise use version from Cargo.toml
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          tag="${{ steps.version.outputs.tag }}"
+
+          # Rename tarballs with version
+          for platform in darwin-arm64 linux-x86_64; do
+            src="artifacts/uniskill-${platform}/uniskill-${platform}.tar.gz"
+            dst="release/uniskill-${platform}-${tag}.tar.gz"
+            cp "$src" "$dst"
+          done
+
+          # Generate checksums
+          cd release
+          sha256sum *.tar.gz > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        id: changelog
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: uniskill ${{ steps.version.outputs.tag }}
+          body: ${{ steps.changelog.outputs.content }}
+          files: |
+            release/uniskill-darwin-arm64-${{ steps.version.outputs.tag }}.tar.gz
+            release/uniskill-linux-x86_64-${{ steps.version.outputs.tag }}.tar.gz
+            release/checksums-sha256.txt

@@ -1,5 +1,6 @@
 # Build artifacts
 target/
+dist/
 **/*.rs.bk
 
 # Docker dev container state

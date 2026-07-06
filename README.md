@@ -16,12 +16,28 @@ uniskill does not publish bundles, manage individual skill files outside bundles
 
 ### Install
 
+**From source (requires [rustup](https://rustup.rs/)):**
+
+```bash
+make install          # builds release binary and copies to ~/.local/bin/
+```
+
+Or manually:
+
 ```bash
 cargo build --release
 cp target/release/uniskill ~/.local/bin/
 ```
 
-Or use Docker: `make build` produces the binary via the dev container.
+**From a GitHub Release:**
+
+Download the latest tarball for your platform from
+[Releases](../../releases), extract, and place the binary on your `PATH`:
+
+```bash
+tar xzf uniskill-darwin-arm64-v*.tar.gz   # or linux-x86_64
+mv uniskill ~/.local/bin/
+```
 
 ### Configure
 

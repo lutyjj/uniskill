@@ -1,71 +1,63 @@
 PROJECT          := uniskill
 RUST_VERSION     ?= 1.96.1
-DOCKER_IMAGE     ?= uniskill-build
-CARGO_CACHE_VOLUME?= $(PROJECT)-cargo-cache
-PLATFORM         ?= linux/amd64
+TARGET_TRIPLE    ?= $(shell scripts/host-triple.sh)
+INSTALL_DIR      ?= $(HOME)/.local/bin
 
-# Default target: x86_64-unknown-linux-gnu
-TARGET_TRIPLE    ?= x86_64-unknown-linux-gnu
+RELEASE_BIN      := target/$(TARGET_TRIPLE)/release/$(PROJECT)
 
-CARGO_CACHE      := /usr/local/cargo/registry
-
-define _build
-	@docker run --rm \
-		--platform $(PLATFORM) \
-		-v $(CURDIR):/src \
-		-v $(CARGO_CACHE_VOLUME):$(CARGO_CACHE) \
-		-w /src \
-		-e CC=gcc \
-		$(DOCKER_IMAGE) \
-		bash -c "rustup default $(RUST_VERSION) && rustup target add $(TARGET_TRIPLE) && cargo clean && exec cargo $1 --target $(TARGET_TRIPLE)"
-endef
-
-## Build. Default: x86_64-unknown-linux-gnu. Override with TARGET_TRIPLE=<triple>.
+## Build release binary for the host platform
 .PHONY: build
 build:
-	@mkdir -p target/$(TARGET_TRIPLE)/release
-	@echo ">> building $(TARGET_TRIPLE)"
-	$(call _build,build --release)
-	@echo "✓ → target/$(TARGET_TRIPLE)/release/$(PROJECT)"
+	@echo ">> building $(TARGET_TRIPLE) (release)"
+	cargo build --release --target $(TARGET_TRIPLE)
+	@echo "✓ → $(RELEASE_BIN)"
 
-## Run tests for TARGET_TRIPLE (cross-test only; does not execute binaries)
+## Build debug binary (fast iteration)
+.PHONY: dev
+dev:
+	@echo ">> building $(TARGET_TRIPLE) (debug)"
+	cargo build --target $(TARGET_TRIPLE)
+
+## Run tests
 .PHONY: test
 test:
-	@echo ">> testing $(TARGET_TRIPLE)"
-	$(call _build,test --all-features)
+	@echo ">> testing"
+	cargo test --all-features
 
 ## Check formatting
 .PHONY: fmt-check
 fmt-check:
-	$(call _build,fmt -- --check)
+	cargo fmt -- --check
 
 ## Fix formatting
 .PHONY: fmt-fix
 fmt-fix:
-	$(call _build,fmt)
+	cargo fmt
 
 ## Run clippy lint
 .PHONY: clippy
 clippy:
-	$(call _build,clippy --all-features -- -D warnings)
+	cargo clippy --all-features -- -D warnings
 
-## Clean build artifacts for current target
+## Build release and copy to INSTALL_DIR
+.PHONY: install
+install: build
+	@mkdir -p $(INSTALL_DIR)
+	cp $(RELEASE_BIN) $(INSTALL_DIR)/$(PROJECT)
+	@echo "✓ installed → $(INSTALL_DIR)/$(PROJECT)"
+
+## Clean build artifacts
 .PHONY: clean
 clean:
-	rm -rf target/$(TARGET_TRIPLE)/release
-
-## Drop cargo registry cache volume
-.PHONY: clean-cache
-clean-cache:
-	docker volume rm $(CARGO_CACHE_VOLUME) 2>/dev/null || true
+	cargo clean
 
 ## Print config
 .PHONY: info
 info:
-	@echo "PLATFORM    = $(PLATFORM)"
 	@echo "TARGET_TRIPLE = $(TARGET_TRIPLE)"
 	@echo "RUST_VERSION  = $(RUST_VERSION)"
-	@echo "DOCKER_IMAGE  = $(DOCKER_IMAGE)"
+	@echo "INSTALL_DIR   = $(INSTALL_DIR)"
+	@rustc --version 2>/dev/null || echo "rustc not found"
 
 ## Show help
 .PHONY: help
