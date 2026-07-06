@@ -68,7 +68,6 @@ pub struct ProjectConfig {
     pub project_harnesses: HashMap<String, LocalHarness>,
 }
 
-
 /// Resolve environment variables in a string.
 /// Supports $VAR and ${VAR} syntax. Unresolvable vars pass through unchanged.
 pub fn expand_env_vars(s: &str) -> String {
@@ -97,9 +96,7 @@ pub fn expand_env_vars(s: &str) -> String {
                 // $VAR syntax — collect alphanumeric/underscore chars
                 let start = i + 1;
                 let mut end = start;
-                while end < chars.len()
-                    && (chars[end].is_alphanumeric() || chars[end] == '_')
-                {
+                while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
                     end += 1;
                 }
                 if end > start {
@@ -136,8 +133,8 @@ pub fn parse_config<P: AsRef<Path>>(path: P) -> crate::error::Result<Config> {
     }
 
     let content = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&content)
-        .map_err(|e| crate::error::AppError::ConfigParse(e))?;
+    let config: Config =
+        toml::from_str(&content).map_err(|e| crate::error::AppError::ConfigParse(e))?;
     Ok(config)
 }
 
@@ -163,7 +160,6 @@ pub fn resolve_source(source: &str) -> PathBuf {
         PathBuf::from(expanded)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -197,7 +193,10 @@ harnesses = ["pi"]
     #[test]
     fn test_env_var_dollar_syntax() {
         let result = expand_env_vars("$HOME/.agents/skills");
-        assert_eq!(result, format!("{}/.agents/skills", env::var("HOME").unwrap()));
+        assert_eq!(
+            result,
+            format!("{}/.agents/skills", env::var("HOME").unwrap())
+        );
     }
 
     #[test]
@@ -227,7 +226,10 @@ pattern = "/custom/path/skills/{name}"
         let config = parse_config(file.path()).unwrap();
         // Only user-defined harnesses are in the parsed map; defaults merge in cli::sync
         assert!(config.harnesses.contains_key("my-harness"));
-        assert_eq!(config.harnesses["my-harness"].pattern, "/custom/path/skills/{name}");
+        assert_eq!(
+            config.harnesses["my-harness"].pattern,
+            "/custom/path/skills/{name}"
+        );
     }
 
     #[test]
@@ -273,7 +275,10 @@ pattern = "/opt/custom/skills/{name}"
     fn test_resolve_source_expands_env_vars() {
         let home = env::var("HOME").unwrap();
         let resolved = resolve_source("$HOME/.dotfiles/skills");
-        assert_eq!(resolved, PathBuf::from(format!("{}/.dotfiles/skills", home)));
+        assert_eq!(
+            resolved,
+            PathBuf::from(format!("{}/.dotfiles/skills", home))
+        );
     }
 
     #[test]

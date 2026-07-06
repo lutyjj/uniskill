@@ -27,9 +27,8 @@ pub fn assemble_virtual_bundle(
 
         // Create the target directory if it doesn't exist yet.
         if !dest.exists() {
-            fs::create_dir_all(&skill_dir).with_context(|| {
-                format!("failed to create skill cache dir for '{skill_name}'")
-            })?;
+            fs::create_dir_all(&skill_dir)
+                .with_context(|| format!("failed to create skill cache dir for '{skill_name}'"))?;
         }
 
         download_skill(entry.url.as_str(), &dest)?;
@@ -44,7 +43,8 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
     // Check existing file first — fast path for unchanged skills.
     let existing_size = fs::metadata(dest).ok().map(|m| m.len());
 
-    let response = ureq::get(url).call()
+    let response = ureq::get(url)
+        .call()
         .with_context(|| format!("failed to fetch skill from {url}"))?;
 
     let status = response.status();
@@ -55,7 +55,8 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
         ));
     }
 
-    let body: String = response.into_string()
+    let body: String = response
+        .into_string()
         .with_context(|| format!("failed to read response body from {url}"))?;
 
     let body_bytes = body.as_bytes();
@@ -74,18 +75,15 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
 
     // Write atomically: write to temp file, then rename.
     let tmp = dest.with_extension("tmp");
-    let mut file = File::create(&tmp).with_context(|| {
-        format!("failed to create temp file at {:?}", tmp)
-    })?;
-    file.write_all(body_bytes).with_context(|| {
-        format!("failed to write skill content to {:?}", dest)
-    })?;
+    let mut file =
+        File::create(&tmp).with_context(|| format!("failed to create temp file at {:?}", tmp))?;
+    file.write_all(body_bytes)
+        .with_context(|| format!("failed to write skill content to {:?}", dest))?;
     drop(file);
 
     // Atomic rename replaces the old file.
-    fs::rename(&tmp, dest).with_context(|| {
-        format!("failed to replace skill file at {:?}", dest)
-    })?;
+    fs::rename(&tmp, dest)
+        .with_context(|| format!("failed to replace skill file at {:?}", dest))?;
 
     Ok(())
 }
@@ -102,11 +100,15 @@ mod tests {
         let mut skills = HashMap::new();
         skills.insert(
             "caveman".to_string(),
-            SkillEntry { url: "https://example.com/caveman.md".to_string() },
+            SkillEntry {
+                url: "https://example.com/caveman.md".to_string(),
+            },
         );
         skills.insert(
             "code-design".to_string(),
-            SkillEntry { url: "https://example.com/code.md".to_string() },
+            SkillEntry {
+                url: "https://example.com/code.md".to_string(),
+            },
         );
 
         let result = assemble_virtual_bundle("test-bundle", &skills, &base);

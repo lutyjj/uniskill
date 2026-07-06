@@ -10,8 +10,7 @@ pub struct SyncResult {
     pub status: SyncStatus,
 }
 
-#[derive(Debug, Clone)]
-#[derive(PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SyncStatus {
     /// Symlink already exists and points to the correct target
     Ok,
@@ -28,7 +27,8 @@ pub enum SyncStatus {
 /// Ensure a single skill is symlinked from `source` to `target`.
 pub fn ensure_skill_symlink(source: &Path, target_dir: &Path) -> SyncResult {
     let target = PathBuf::from(target_dir);
-    let skill_name = source.file_name()
+    let skill_name = source
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
@@ -92,14 +92,20 @@ pub fn ensure_skill_symlink(source: &Path, target_dir: &Path) -> SyncResult {
     let abs_source = if source.is_absolute() {
         source.to_path_buf()
     } else {
-        std::env::current_dir().map(|c| c.join(source)).unwrap_or_else(|_| source.to_path_buf())
+        std::env::current_dir()
+            .map(|c| c.join(source))
+            .unwrap_or_else(|_| source.to_path_buf())
     };
 
     match create_symlink(&abs_source, &target) {
         Ok(()) => SyncResult {
             skill_name,
             target: target.to_string_lossy().to_string(),
-            status: if existed { SyncStatus::Updated } else { SyncStatus::Created },
+            status: if existed {
+                SyncStatus::Updated
+            } else {
+                SyncStatus::Created
+            },
         },
         Err(_e) => SyncResult {
             skill_name,
@@ -149,7 +155,8 @@ pub fn sync_bundle(source: &Path, pattern: &str) -> Vec<SyncResult> {
         }
 
         // Resolve the install path using the harness pattern
-        let skill_name = skill_path.file_name()
+        let skill_name = skill_path
+            .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
 

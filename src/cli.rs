@@ -39,7 +39,10 @@ pub fn run() -> Result<()> {
                 sync_from_path(explicit_config.clone())
             } else if let Some(proj_config) = config::discover_project_config() {
                 // Project-local uniskill.toml found in CWD
-                eprintln!("[debug] Found project config, {} bundles", proj_config.bundles.len());
+                eprintln!(
+                    "[debug] Found project config, {} bundles",
+                    proj_config.bundles.len()
+                );
                 sync_project(&proj_config, std::env::current_dir().unwrap_or_default())
             } else {
                 // Fall back to global config
@@ -63,7 +66,10 @@ fn sync_from_path(config_path: PathBuf) -> Result<()> {
         let label = user_harness.label.clone().unwrap_or_else(|| name.clone());
         registry.insert(
             name.clone(),
-            harnesses::HarnessDef { label, pattern: user_harness.pattern.clone() },
+            harnesses::HarnessDef {
+                label,
+                pattern: user_harness.pattern.clone(),
+            },
         );
     }
 
@@ -84,7 +90,10 @@ fn sync_project(project_config: &config::ProjectConfig, config_dir: PathBuf) -> 
         let label = local_harness.label.clone().unwrap_or_else(|| name.clone());
         registry.insert(
             name.clone(),
-            harnesses::HarnessDef { label, pattern: resolved.to_string_lossy().to_string() },
+            harnesses::HarnessDef {
+                label,
+                pattern: resolved.to_string_lossy().to_string(),
+            },
         );
     }
 
@@ -114,7 +123,10 @@ fn sync_with_registry(
                 fetcher::assemble_virtual_bundle(bundle_name, &bundle.skills, cache_dir)?
             }
             _ => {
-                eprintln!("[debug] Bundle '{}' has neither source nor skills — skipping", bundle_name);
+                eprintln!(
+                    "[debug] Bundle '{}' has neither source nor skills — skipping",
+                    bundle_name
+                );
                 continue;
             }
         };
@@ -132,7 +144,12 @@ fn sync_with_registry(
             }
 
             let harness = registry.get(harness_name).unwrap();
-            eprintln!("[debug] Syncing {} into {} ({})", source.display(), harness.label, harness.pattern);
+            eprintln!(
+                "[debug] Syncing {} into {} ({})",
+                source.display(),
+                harness.label,
+                harness.pattern
+            );
             let results = linker::sync_bundle(&source, &harness.pattern);
             eprintln!("[debug] Got {} results", results.len());
 
@@ -171,7 +188,13 @@ fn sync_with_registry(
     }
 
     println!();
-    print_status(total_ok, total_created, total_updated, total_broken, total_conflict);
+    print_status(
+        total_ok,
+        total_created,
+        total_updated,
+        total_broken,
+        total_conflict,
+    );
 
     // Exit with error if there were conflicts (non-zero exit code).
     if total_conflict > 0 || total_broken > 0 {
@@ -189,6 +212,10 @@ fn print_status(ok: usize, created: usize, updated: usize, broken: usize, confli
     let total = ok + created + updated;
     println!(
         "synced {} skills ({} ok, {} new, {} changed, {} skipped)",
-        total, ok, created, updated, conflicts + broken
+        total,
+        ok,
+        created,
+        updated,
+        conflicts + broken
     );
 }
