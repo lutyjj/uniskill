@@ -28,21 +28,14 @@ jobs:
           rustup target add ${{ matrix.target }}
           rustup component add rustfmt clippy
 
-      - name: Cache cargo registry & build
+      - name: Cache cargo registry
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-features --target ${{ matrix.target }} -- -D warnings
-
-      - name: Test
-        run: cargo test --all-features --target ${{ matrix.target }}
+      - name: Release gate
+        run: make release TARGET_TRIPLE=${{ matrix.target }}

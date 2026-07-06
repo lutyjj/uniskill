@@ -135,7 +135,7 @@ mod tests {
 
         // Spawn a one-shot server that returns our skill content.
         std::thread::spawn(move || {
-            if let Ok(mut request) = server.recv() {
+            if let Ok(request) = server.recv() {
                 let response = Response::from_string(expected_body);
                 request.respond(response).ok();
             }

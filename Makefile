@@ -2,8 +2,13 @@ PROJECT          := uniskill
 RUST_VERSION     ?= 1.96.1
 TARGET_TRIPLE    ?= $(shell scripts/host-triple.sh)
 INSTALL_DIR      ?= $(HOME)/.local/bin
+DIST_DIR         ?= dist
+PACKAGE_NAME     ?= $(PROJECT)-$(TARGET_TRIPLE)
 
 RELEASE_BIN      := target/$(TARGET_TRIPLE)/release/$(PROJECT)
+DIST_BIN         := $(DIST_DIR)/$(PACKAGE_NAME)
+DIST_TARBALL     := $(DIST_DIR)/$(PACKAGE_NAME).tar.gz
+DIST_SHA256      := $(DIST_DIR)/$(PACKAGE_NAME).sha256
 
 ## Build release binary (auto-formats first)
 .PHONY: build
@@ -18,16 +23,30 @@ dev:
 	@echo ">> building $(TARGET_TRIPLE) (debug)"
 	cargo build --target $(TARGET_TRIPLE)
 
-## Pre-release gate: fmt-check + clippy + test + build (mirrors CI)
+## Pre-release gate: fmt-check + clippy + test + package (mirrors CI)
 .PHONY: release
-release: fmt-check clippy test build-only
-	@echo "✓ release-ready → $(RELEASE_BIN)"
+release: fmt-check clippy test package
+	@echo "✓ release-ready → $(DIST_BIN), $(DIST_TARBALL)"
 
 ## Build release binary without formatting (used by release target and CI)
 .PHONY: build-only
 build-only:
 	@echo ">> building $(TARGET_TRIPLE) (release)"
 	cargo build --release --target $(TARGET_TRIPLE)
+
+## Build release assets in DIST_DIR: raw binary, tarball, checksum file
+.PHONY: package
+package: build-only
+	@echo ">> packaging $(PACKAGE_NAME)"
+	@mkdir -p $(DIST_DIR) $(DIST_DIR)/staging/$(PACKAGE_NAME)
+	cp $(RELEASE_BIN) $(DIST_BIN)
+	chmod 755 $(DIST_BIN)
+	cp $(RELEASE_BIN) $(DIST_DIR)/staging/$(PACKAGE_NAME)/$(PROJECT)
+	chmod 755 $(DIST_DIR)/staging/$(PACKAGE_NAME)/$(PROJECT)
+	tar czf $(DIST_TARBALL) -C $(DIST_DIR)/staging/$(PACKAGE_NAME) $(PROJECT)
+	shasum -a 256 $(DIST_BIN) $(DIST_TARBALL) > $(DIST_SHA256)
+	@echo "✓ packaged → $(DIST_BIN)"
+	@echo "✓ packaged → $(DIST_TARBALL)"
 
 ## Run tests
 .PHONY: test
@@ -68,10 +87,13 @@ info:
 	@echo "TARGET_TRIPLE = $(TARGET_TRIPLE)"
 	@echo "RUST_VERSION  = $(RUST_VERSION)"
 	@echo "INSTALL_DIR   = $(INSTALL_DIR)"
+	@echo "DIST_DIR      = $(DIST_DIR)"
+	@echo "PACKAGE_NAME  = $(PACKAGE_NAME)"
 	@rustc --version 2>/dev/null || echo "rustc not found"
 
 ## Show help
 .PHONY: help
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+	@awk '/^## / { help = substr($$0, 4); next } \
+		/^[a-zA-Z_-]+:/ { split($$1, target, ":"); if (help) { printf "  \033[36m%-15s\033[0m %s\n", target[1], help; help = "" } }' \
+		$(MAKEFILE_LIST)

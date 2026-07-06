@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Bundle {
-    /// Path to local bundle root; ignored when skills is present.
+    /// Path to local bundle root; takes precedence over `skills` when both are present.
     pub source: Option<String>,
 
     /// Which harnesses to wire this bundle into.
@@ -66,6 +66,12 @@ pub struct ProjectConfig {
     /// deserialises from the `[harnesses.XXX]` TOML key to match DESIGN.md.
     #[serde(default, rename = "harnesses")]
     pub project_harnesses: HashMap<String, LocalHarness>,
+}
+
+#[derive(Debug)]
+pub struct ProjectConfigFile {
+    pub config: ProjectConfig,
+    pub path: PathBuf,
 }
 
 /// Resolve environment variables in a string.
@@ -137,17 +143,32 @@ pub fn parse_config<P: AsRef<Path>>(path: P) -> crate::error::Result<Config> {
     Ok(config)
 }
 
-/// Discover a project-local config (`uniskill.toml`) in the current directory.
-/// Returns `Ok` if found, `Err` if not present (caller falls back to global).
-pub fn discover_project_config() -> Option<ProjectConfig> {
-    let candidate = std::env::current_dir().ok()?.join("uniskill.toml");
-    if !candidate.exists() {
-        return None;
+pub fn parse_project_config<P: AsRef<Path>>(path: P) -> crate::error::Result<ProjectConfig> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Err(crate::error::AppError::ConfigNotFound(
+            path.to_string_lossy().to_string(),
+        ));
     }
 
-    let content = std::fs::read_to_string(&candidate).ok()?;
-    let config: ProjectConfig = toml::from_str(&content).ok()?;
-    Some(config)
+    let content = std::fs::read_to_string(path)?;
+    let config: ProjectConfig =
+        toml::from_str(&content).map_err(crate::error::AppError::ConfigParse)?;
+    Ok(config)
+}
+
+/// Discover a project-local config (`uniskill.toml`) in the current directory.
+pub fn discover_project_config() -> crate::error::Result<Option<ProjectConfigFile>> {
+    let candidate = std::env::current_dir()?.join("uniskill.toml");
+    if !candidate.exists() {
+        return Ok(None);
+    }
+
+    let config = parse_project_config(&candidate)?;
+    Ok(Some(ProjectConfigFile {
+        config,
+        path: candidate,
+    }))
 }
 
 /// Resolve a bundle's source path after env var expansion.
@@ -157,6 +178,16 @@ pub fn resolve_source(source: &str) -> PathBuf {
         PathBuf::new()
     } else {
         PathBuf::from(expanded)
+    }
+}
+
+/// Resolve a source path relative to the config file that declared it.
+pub fn resolve_source_from(source: &str, base_dir: &Path) -> PathBuf {
+    let resolved = resolve_source(source);
+    if resolved.as_os_str().is_empty() || resolved.is_absolute() {
+        resolved
+    } else {
+        base_dir.join(resolved)
     }
 }
 
@@ -287,6 +318,18 @@ pattern = "/opt/custom/skills/{name}"
     }
 
     #[test]
+    fn test_resolve_source_from_joins_relative_path_to_config_dir() {
+        let resolved = resolve_source_from("./skills", Path::new("/repo"));
+        assert_eq!(resolved, PathBuf::from("/repo/./skills"));
+    }
+
+    #[test]
+    fn test_resolve_source_from_keeps_absolute_path() {
+        let resolved = resolve_source_from("/skills", Path::new("/repo"));
+        assert_eq!(resolved, PathBuf::from("/skills"));
+    }
+
+    #[test]
     fn test_expand_env_vars_multiple_vars() {
         let home = env::var("HOME").unwrap();
         let result = expand_env_vars("$HOME/.agents/$USER");
@@ -324,6 +367,13 @@ pattern = ".agents/skills/{name}"
         let harness = config.project_harnesses.get("local-agent").unwrap();
         assert_eq!(harness.label, Some("Local Agent".to_string()));
         assert_eq!(harness.pattern, ".agents/skills/{name}");
+    }
+
+    #[test]
+    fn test_parse_project_config_reports_invalid_toml() {
+        let file = write_temp_toml("[bundles");
+        let result = parse_project_config(file.path());
+        assert!(result.is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # uniskill configuration
 # Place this at ~/.config/uniskill/config.toml or pass --config
 
-[[bundles]]
+[bundles.my-skills]
 source = "$HOME/.dotfiles/skills"
 harnesses = ["pi", "claude-code"]
 

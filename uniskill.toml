@@ -2,7 +2,6 @@
 # Both local and virtual bundles wired into the same project harness.
 
 [harnesses.agents]
-scope = "project"
 pattern = ".agents/skills/{name}"
 
 # Local bundle: our own development skill, installed project-locally

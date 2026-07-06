@@ -2,7 +2,7 @@
 
 uniskill wires skill bundles from their source directory into multiple agent harnesses via symlinks. One bundle, installed to whatever harnesses you declare. The tool handles path resolution automatically.
 
-> See [USER_JOURNEY.md](file:///Users/lutyjj/workplace/i-hate-agents-md/docs/USER_JOURNEY.md) for concrete examples of global, project-level, and custom harness workflows.
+> See [USER_JOURNEY.md](USER_JOURNEY.md) for concrete examples of global, project-level, and custom harness workflows.
 
 ## Scope
 
@@ -91,19 +91,17 @@ Different harnesses use different conventions. The tool knows each harness's exp
 
 A harness defines where a particular agent expects its skills to live. Instead of a hardcoded registry, harnesses are configured dynamically. `uniskill` ships with built-in defaults for known global harnesses, but users can extend or override them.
 
-The critical concept is **Scope**:
-- **Global**: The harness operates system-wide (e.g., its path pattern is absolute, typically rooted in `$HOME`).
-- **Project**: The harness operates only within a specific repository (e.g., its path pattern is relative to the project root, like `.claude/skills`).
+Scope is derived from the config file that declares the harness:
+- **Global config**: Patterns are used as declared, typically absolute or rooted in `$HOME`.
+- **Project config**: Custom harness patterns are resolved relative to the project root.
 
 Users can define custom harnesses directly in their configuration files:
 
 ```toml
 [harnesses.company-agent]
-scope = "global"
 pattern = "$HOME/.company-agent/skills/{name}"
 
 [harnesses.local-claude]
-scope = "project"
 pattern = ".claude/skills/{name}"
 ```
 
@@ -119,7 +117,6 @@ Configuration is merged from two layers, allowing seamless interaction between g
 
 # Define custom harnesses (optional)
 [harnesses.agents]
-scope = "project"
 pattern = ".agents/skills/{name}"
 
 # Local bundle: source is a path on disk
@@ -171,7 +168,7 @@ uniskill init <harness> # detect harness installation and add to registry
 User has a skill repo at `/home/user/.dotfiles/skills/` with `meta.toml` and several skills. Config declares it for two harnesses:
 
 ```toml
-[[bundles]]
+[bundles.my-skills]
 source = "$HOME/.dotfiles/skills"
 harnesses = ["pi", "claude-code"]
 ```
@@ -186,7 +183,7 @@ After `uniskill sync`:
 
 All `source` paths and harness patterns support `$VAR` and `${VAR}` expansion. The tool resolves variables from the current process environment at runtime. This makes config portable across machines without manual editing.
 
-Supported variables: `$HOME`, `$USER`, `$PATH`, or any other env var. Unresolvable variables cause a clear error during `sync`.
+Supported variables: `$HOME`, `$USER`, `$PATH`, or any other env var. Unresolvable variables are left unchanged.
 
 ## Symlink strategy
 

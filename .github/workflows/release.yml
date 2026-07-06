@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -26,40 +26,59 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="v${version}"
+          fi
+          if [[ "$tag" != "v${version}" ]]; then
+            echo "tag ${tag} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         run: |
           rustup toolchain install stable --no-self-update
           rustup default stable
           rustup target add ${{ matrix.target }}
+          rustup component add rustfmt clippy
 
-      - name: Cache cargo registry & build
+      - name: Cache cargo registry
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Release gate
+        run: make release TARGET_TRIPLE=${{ matrix.target }} PACKAGE_NAME=uniskill-${{ matrix.name }}-${{ steps.version.outputs.tag }}
 
-      - name: Create tarball
+      - name: List release assets
         run: |
-          mkdir -p staging
-          cp target/${{ matrix.target }}/release/uniskill staging/
-          tar czf uniskill-${{ matrix.name }}.tar.gz -C staging uniskill
+          ls -lh dist/uniskill-${{ matrix.name }}-${{ steps.version.outputs.tag }}*
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: uniskill-${{ matrix.name }}
-          path: uniskill-${{ matrix.name }}.tar.gz
+          path: |
+            dist/uniskill-${{ matrix.name }}-${{ steps.version.outputs.tag }}
+            dist/uniskill-${{ matrix.name }}-${{ steps.version.outputs.tag }}.tar.gz
 
-  release:
+  publish:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
@@ -68,15 +87,20 @@ jobs:
 
       - name: Extract version
         id: version
+        shell: bash
         run: |
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          # Use tag name if triggered by tag, otherwise use version from Cargo.toml
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            tag="${GITHUB_REF#refs/tags/}"
           else
-            echo "tag=v$v" >> "$GITHUB_OUTPUT"
+            tag="v${version}"
           fi
+          if [[ "$tag" != "v${version}" ]]; then
+            echo "tag ${tag} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -84,20 +108,20 @@ jobs:
           path: artifacts/
 
       - name: Prepare release assets
+        shell: bash
         run: |
           mkdir -p release
-          tag="${{ steps.version.outputs.tag }}"
+          find artifacts -type f -name 'uniskill-*' -exec cp {} release/ \;
 
-          # Rename tarballs with version
-          for platform in darwin-arm64 linux-x86_64; do
-            src="artifacts/uniskill-${platform}/uniskill-${platform}.tar.gz"
-            dst="release/uniskill-${platform}-${tag}.tar.gz"
-            cp "$src" "$dst"
-          done
+          asset_count=$(find release -type f -name 'uniskill-*' | wc -l | tr -d ' ')
+          if [[ "$asset_count" -ne 4 ]]; then
+            echo "expected 4 release assets, found ${asset_count}" >&2
+            find release -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
 
-          # Generate checksums
           cd release
-          sha256sum *.tar.gz > checksums-sha256.txt
+          shasum -a 256 uniskill-* > checksums-sha256.txt
           cat checksums-sha256.txt
 
       - name: Generate changelog
@@ -115,7 +139,10 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: uniskill ${{ steps.version.outputs.tag }}
           body: ${{ steps.changelog.outputs.content }}
+          target_commitish: ${{ github.sha }}
           files: |
+            release/uniskill-darwin-arm64-${{ steps.version.outputs.tag }}
             release/uniskill-darwin-arm64-${{ steps.version.outputs.tag }}.tar.gz
+            release/uniskill-linux-x86_64-${{ steps.version.outputs.tag }}
             release/uniskill-linux-x86_64-${{ steps.version.outputs.tag }}.tar.gz
             release/checksums-sha256.txt

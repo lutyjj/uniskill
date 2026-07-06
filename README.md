@@ -31,11 +31,16 @@ cp target/release/uniskill ~/.local/bin/
 
 **From a GitHub Release:**
 
-Download the latest tarball for your platform from
-[Releases](../../releases), extract, and place the binary on your `PATH`:
+Download the latest asset for your platform from [Releases](../../releases).
+Raw binaries are attached for direct installs, and tarballs are attached for
+preserving executable metadata:
 
 ```bash
-tar xzf uniskill-darwin-arm64-v*.tar.gz   # or linux-x86_64
+mkdir -p ~/.local/bin
+install -m 755 uniskill-darwin-arm64-v0.1.0 ~/.local/bin/uniskill
+
+# Or use the tarball:
+tar xzf uniskill-darwin-arm64-v0.1.0.tar.gz
 mv uniskill ~/.local/bin/
 ```
 
@@ -44,7 +49,7 @@ mv uniskill ~/.local/bin/
 Create a global config at `~/.config/uniskill/config.toml`:
 
 ```toml
-[[bundles]]
+[bundles.my-skills]
 source = "$HOME/.dotfiles/skills"
 harnesses = ["pi", "claude-code"]
 ```
@@ -53,10 +58,9 @@ Or a project config at `<repo-root>/uniskill.toml`:
 
 ```toml
 [harnesses.agents]
-scope = "project"
 pattern = ".agents/skills/{name}"
 
-[[bundles]]
+[bundles.my-bundle]
 source = "./my-bundle"
 harnesses = ["agents"]
 ```
@@ -89,8 +93,8 @@ Defines bundles and custom harnesses for system-wide use.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `bundles` | array of objects | Bundle declarations with `source` and `harnesses` fields |
-| `harnesses.<name>` | object | Custom harness definition with `scope`, `pattern`, optional `label` |
+| `bundles.<name>` | object | Bundle declaration with `source` and `harnesses` fields |
+| `harnesses.<name>` | object | Custom harness definition with `pattern` and optional `label` |
 
 ### Project config (`uniskill.toml`)
 
@@ -100,7 +104,7 @@ Built-in harnesses can be referenced directly by name (e.g., `"pi"`). User-defin
 
 ### Environment variable expansion
 
-All paths support `$VAR` and `${VAR}` expansion resolved at runtime. Unresolvable variables produce an error during sync. This makes config portable across machines.
+All paths support `$VAR` and `${VAR}` expansion resolved at runtime. Unresolvable variables are left unchanged, so use environment variables that are guaranteed to exist on the target machine.
 
 ## Built-in harnesses
 
@@ -116,6 +120,20 @@ Override any built-in harness by defining it in your config with the same name.
 | Command | Description |
 |---------|-------------|
 | `uniskill sync` | Create or update symlinks for all declared bundles |
+
+## Release process
+
+`make release` is the local release gate. It checks formatting, runs clippy,
+runs tests, builds the release binary, and writes distributable assets to
+`dist/`:
+
+```bash
+make release
+```
+
+Tag releases with `v<version>` matching `Cargo.toml`. The GitHub release
+workflow runs the same gate for each supported target, publishes raw binaries,
+tarballs, and `checksums-sha256.txt`.
 
 ## Sync behavior
 

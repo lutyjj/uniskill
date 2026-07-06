@@ -22,11 +22,10 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
 1. **Define Harness**: In their global config, the user defines the new harness pattern.
    ```toml
    # ~/.config/uniskill/config.toml
-   
+
    [harnesses.alpha-agent]
-   scope = "global"
    pattern = "$HOME/.config/alpha-agent/plugins/{name}"
-   
+
    [bundles.my-skills]
    source = "$HOME/.dotfiles/my-skills"
    harnesses = ["alpha-agent", "pi"]
@@ -40,11 +39,10 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
 2. **Configure**:
    ```toml
    # /workspace/monorepo/uniskill.toml
-   
+
    [harnesses.local-claude]
-   scope = "project"
    pattern = ".claude/skills/{name}" # Relative path to project root
-   
+
    [bundles.local-tools]
    source = "./scripts/agent-skills" # Relative path to bundle in the repo
    harnesses = ["local-claude"]
@@ -57,11 +55,10 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
 1. **Configure**: In the project's `uniskill.toml`, they reference their global bundle but point it to a project harness:
    ```toml
    # /workspace/isolated-project/uniskill.toml
-   
+
    [harnesses.local-agent]
-   scope = "project"
    pattern = ".agents/skills/{name}"
-   
+
    [bundles.global-in-project]
    source = "$HOME/.dotfiles/my-skills" # Global source
    harnesses = ["local-agent"]          # Local destination
@@ -74,11 +71,10 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
 1. **Override**: The user redefines the built-in `claude-code` harness in their global config.
    ```toml
    # ~/.config/uniskill/config.toml
-   
+
    [harnesses.claude-code]
-   scope = "global"
    pattern = "/opt/claude/skills/{name}" # Overrides the built-in default
-   
+
    [bundles.my-skills]
    source = "$HOME/skills"
    harnesses = ["claude-code"]
@@ -92,15 +88,14 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
 2. **Configure**:
    ```toml
    # /workspace/my-project/uniskill.toml
-   
+
    [harnesses.agents]
-   scope = "project"
    pattern = ".agents/skills/{name}"
-   
+
    # Virtual bundle: fetch caveman from a remote URL
    [bundles.remote-caveman]
    harnesses = ["agents"]
-   
+
    [bundles.remote-caveman.skills.caveman]
    url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/SKILL.md"
    ```
