@@ -5,7 +5,7 @@ INSTALL_DIR      ?= $(HOME)/.local/bin
 
 RELEASE_BIN      := target/$(TARGET_TRIPLE)/release/$(PROJECT)
 
-## Build release binary for the host platform
+## Build release binary (auto-formats first)
 .PHONY: build
 build: fmt-fix
 	@echo ">> building $(TARGET_TRIPLE) (release)"
@@ -18,13 +18,24 @@ dev:
 	@echo ">> building $(TARGET_TRIPLE) (debug)"
 	cargo build --target $(TARGET_TRIPLE)
 
+## Pre-release gate: fmt-check + clippy + test + build (mirrors CI)
+.PHONY: release
+release: fmt-check clippy test build-only
+	@echo "✓ release-ready → $(RELEASE_BIN)"
+
+## Build release binary without formatting (used by release target and CI)
+.PHONY: build-only
+build-only:
+	@echo ">> building $(TARGET_TRIPLE) (release)"
+	cargo build --release --target $(TARGET_TRIPLE)
+
 ## Run tests
 .PHONY: test
 test:
 	@echo ">> testing"
 	cargo test --all-features
 
-## Check formatting
+## Check formatting (fails on drift)
 .PHONY: fmt-check
 fmt-check:
 	cargo fmt -- --check
