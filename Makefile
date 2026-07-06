@@ -1,81 +1,73 @@
-SHELL := /bin/bash
-DOCKER_IMAGE ?= uniskill-dev
-CONTAINER_NAME ?= uniskill-workspace
+PROJECT          := uniskill
+RUST_VERSION     ?= 1.96.1
+DOCKER_IMAGE     ?= uniskill-build
+CARGO_CACHE_VOLUME?= $(PROJECT)-cargo-cache
+PLATFORM         ?= linux/amd64
 
-CARGO_VOLUME ?= uniskill-cargo
+# Default target: x86_64-unknown-linux-gnu
+TARGET_TRIPLE    ?= x86_64-unknown-linux-gnu
 
-.ID_FILE := .docker-container-id
+CARGO_CACHE      := /usr/local/cargo/registry
 
-define run_container
-	@id=$$(cat $(.ID_FILE) 2>/dev/null || true); \
-	if [ -z "$$id" ] || ! docker inspect $$id >/dev/null 2>&1; then \
-		docker volume create --name=$(CARGO_VOLUME) >/dev/null 2>&1; \
-		docker run -d \
-			--name $(CONTAINER_NAME) \
-			-v $$(pwd):/src \
-			-v $(CARGO_VOLUME):/usr/local/cargo/registry \
-			--entrypoint /bin/bash \
-			$(DOCKER_IMAGE) -c "while true; do sleep 1; done" >/dev/null 2>&1; \
-		echo $$! > $(.ID_FILE); \
-	fi
+define _build
+	@docker run --rm \
+		--platform $(PLATFORM) \
+		-v $(CURDIR):/src \
+		-v $(CARGO_CACHE_VOLUME):$(CARGO_CACHE) \
+		-w /src \
+		-e CC=gcc \
+		$(DOCKER_IMAGE) \
+		bash -c "rustup default $(RUST_VERSION) && rustup target add $(TARGET_TRIPLE) && cargo clean && exec cargo $1 --target $(TARGET_TRIPLE)"
 endef
 
-## Build the project
+## Build. Default: x86_64-unknown-linux-gnu. Override with TARGET_TRIPLE=<triple>.
 .PHONY: build
-build: ensure-container
-	docker exec $(CONTAINER_NAME) cargo build --release
+build:
+	@mkdir -p target/$(TARGET_TRIPLE)/release
+	@echo ">> building $(TARGET_TRIPLE)"
+	$(call _build,build --release)
+	@echo "✓ → target/$(TARGET_TRIPLE)/release/$(PROJECT)"
 
-## Run the project (pass args via ARGS=)
-.PHONY: run
-run: build
-	target/release/uniskill $(ARGS)
-
-## Run tests
+## Run tests for TARGET_TRIPLE (cross-test only; does not execute binaries)
 .PHONY: test
-test: ensure-container
-	docker exec $(CONTAINER_NAME) cargo test
+test:
+	@echo ">> testing $(TARGET_TRIPLE)"
+	$(call _build,test --all-features)
 
 ## Check formatting
-.PHONY: fmt
-fmt: ensure-container
-	docker exec $(CONTAINER_NAME) cargo fmt -- --check
+.PHONY: fmt-check
+fmt-check:
+	$(call _build,fmt -- --check)
 
 ## Fix formatting
 .PHONY: fmt-fix
-fmt-fix: ensure-container
-	docker exec $(CONTAINER_NAME) cargo fmt
+fmt-fix:
+	$(call _build,fmt)
 
-## Run clippy
-.PHONY: lint
-lint: ensure-container
-	docker exec $(CONTAINER_NAME) cargo clippy -- -D warnings
+## Run clippy lint
+.PHONY: clippy
+clippy:
+	$(call _build,clippy --all-features -- -D warnings)
 
-## Interactive shell in dev container
-.PHONY: shell
-shell: ensure-container
-	docker exec -it $(CONTAINER_NAME) bash
-
-## Rebuild the dev image
-.PHONY: rebuild-image
-rebuild-image:
-	docker build -t $(DOCKER_IMAGE) -f docker/Dockerfile.dev .
-	@rm -f $(.ID_FILE)
-
-## Clean up container and volumes
+## Clean build artifacts for current target
 .PHONY: clean
 clean:
-	@if [ -n "$$(cat $(.ID_FILE) 2>/dev/null)" ]; then \
-		docker stop $(CONTAINER_NAME) >/dev/null 2>&1; \
-		docker rm $(CONTAINER_NAME) >/dev/null 2>&1; \
-	fi
-	@rm -f $(.ID_FILE)
+	rm -rf target/$(TARGET_TRIPLE)/release
 
-## Ensure container is running (shared dependency)
-.PHONY: ensure-container
-ensure-container:
-	$(call run_container)
+## Drop cargo registry cache volume
+.PHONY: clean-cache
+clean-cache:
+	docker volume rm $(CARGO_CACHE_VOLUME) 2>/dev/null || true
 
-## Show this help
+## Print config
+.PHONY: info
+info:
+	@echo "PLATFORM    = $(PLATFORM)"
+	@echo "TARGET_TRIPLE = $(TARGET_TRIPLE)"
+	@echo "RUST_VERSION  = $(RUST_VERSION)"
+	@echo "DOCKER_IMAGE  = $(DOCKER_IMAGE)"
+
+## Show help
 .PHONY: help
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
