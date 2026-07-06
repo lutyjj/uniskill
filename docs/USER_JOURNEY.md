@@ -10,9 +10,9 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
    ```toml
    # ~/.config/uniskill/config.toml
    
-   [[bundles]]
+   [bundles.my-skills]
    source = "$HOME/.dotfiles/my-skills"
-   harnesses = ["pi", "claude-code"] # These refer to built-in global harnesses
+   harnesses = ["pi", "claude-code"] # Built-in global harnesses
    ```
 3. **Sync**: The user runs `uniskill sync`. The CLI resolves the built-in patterns for `pi` (`$HOME/.agents/skills/{name}`) and `claude-code` (`$HOME/.claude/skills/{name}`) and creates the symlinks.
 
@@ -27,7 +27,7 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
    scope = "global"
    pattern = "$HOME/.config/alpha-agent/plugins/{name}"
    
-   [[bundles]]
+   [bundles.my-skills]
    source = "$HOME/.dotfiles/my-skills"
    harnesses = ["alpha-agent", "pi"]
    ```
@@ -45,7 +45,7 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
    scope = "project"
    pattern = ".claude/skills/{name}" # Relative path to project root
    
-   [[bundles]]
+   [bundles.local-tools]
    source = "./scripts/agent-skills" # Relative path to bundle in the repo
    harnesses = ["local-claude"]
    ```
@@ -62,7 +62,7 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
    scope = "project"
    pattern = ".agents/skills/{name}"
    
-   [[bundles]]
+   [bundles.global-in-project]
    source = "$HOME/.dotfiles/my-skills" # Global source
    harnesses = ["local-agent"]          # Local destination
    ```
@@ -79,8 +79,44 @@ This document outlines the primary user journeys for `uniskill`, demonstrating h
    scope = "global"
    pattern = "/opt/claude/skills/{name}" # Overrides the built-in default
    
-   [[bundles]]
+   [bundles.my-skills]
    source = "$HOME/skills"
    harnesses = ["claude-code"]
    ```
 2. **Sync**: `uniskill` prioritizes the user-defined harness over the built-in one.
+
+## Journey 6: Virtual Bundles — Remote Skills from URLs
+**Goal**: A user wants to import a skill hosted at a public URL (GitHub raw, Pastebin, etc.) into their project without maintaining a local copy.
+
+1. **Create Project Config**: The user creates `uniskill.toml` at the root of the repo.
+2. **Configure**:
+   ```toml
+   # /workspace/my-project/uniskill.toml
+   
+   [harnesses.agents]
+   scope = "project"
+   pattern = ".agents/skills/{name}"
+   
+   # Virtual bundle: fetch caveman from a remote URL
+   [bundles.remote-caveman]
+   harnesses = ["agents"]
+   
+   [bundles.remote-caveman.skills.caveman]
+   url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/SKILL.md"
+   ```
+3. **Sync**: `uniskill sync` downloads the skill into `.uniskill-cache/remote-caveman/skills/caveman/SKILL.md`, then creates `.agents/skills/caveman` as a symlink to the cache.
+4. **Re-run**: On subsequent syncs, uniskill compares the cached file content against the remote URL. If unchanged, no download occurs — the symlink is left as-is.
+
+The user can mix local and virtual bundles under the same harness:
+
+```toml
+[bundles.dev-tools]
+source = "./scripts/agent-skills"
+harnesses = ["agents"]
+
+[bundles.remote-caveman]
+harnesses = ["agents"]
+
+[bundles.remote-caveman.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/SKILL.md"
+```

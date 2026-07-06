@@ -16,32 +16,48 @@ uniskill does not:
 
 ## Fundamental entity: bundle
 
-A bundle is a directory with this structure:
+A bundle is a group of skills wired into one or more harnesses. A bundle can be **local** (a source directory on disk) or **virtual** (skills fetched from remote URLs).
+
+### Local bundle
+
+Source directory structure:
 
 ```
 bundle-name/
-├── meta.toml
+├── meta.toml (optional)
 └── skills/
     └── <skill-name>/
         └── SKILL.md
 ```
 
-`meta.toml` contains the bundle's identity:
+uniskill auto-discovers all subdirectories of `skills/` as skill sources. No manual listing required.
+
+### Virtual bundle
+
+Skills defined by URL instead of a local directory:
 
 ```toml
-name = "my-skills"
-type = "skill"
-description = "Personal skill collection for agent harnesses"
+[bundles.remote-skill]
+harnesses = ["pi"]
+
+[bundles.remote-skill.skills.caveman]
+url = "https://example.com/skills/caveman/SKILL.md"
 ```
 
-The `skills/` directory holds individual skills. uniskill auto-discovers all subdirectories as skill sources. No manual listing required.
+uniskill downloads each URL into a local cache (`~/.cache/uniskill/` for global config, `.uniskill-cache/` relative to project root for project-level config), then wires the cached files into harnesses exactly like local bundles. Cached skills survive across sync runs — only changed URLs are re-fetched.
+
+### Bundle config key
+
+Bundles use `[bundles.<name>]` (map) rather than `[[bundles]]` (array). Each map key is the bundle name and becomes part of downstream paths (cache directory, log messages). This lets multiple bundles coexist in one config without ambiguity, and keeps skill entries grouped under their bundle.
 
 ## Installation model
 
-You declare a bundle and which harnesses it should install to. The harness registry resolves the target paths.
+You declare bundles under `[bundles.<name>]` and specify which harnesses to wire them into. The harness registry resolves target paths.
+
+### Local bundle example
 
 ```toml
-[[bundles]]
+[bundles.my-skills]
 source = "/home/user/repos/my-skills"
 harnesses = ["pi", "claude-code"]
 ```
@@ -49,8 +65,24 @@ harnesses = ["pi", "claude-code"]
 The tool creates symlinks:
 
 ```
-/source/bundle/skills/caveman → $HOME/.agents/skills/caveman (for pi)
-/source/bundle/skills/caveman → $HOME/.claude/skills/caveman  (for claude-code)
+/home/user/repos/my-skills/skills/caveman → $HOME/.agents/skills/caveman (for pi)
+/home/user/repos/my-skills/skills/caveman → $HOME/.claude/skills/caveman  (for claude-code)
+```
+
+### Virtual bundle example
+
+```toml
+[bundles.remote-skill]
+harnesses = ["pi"]
+
+[bundles.remote-skill.skills.caveman]
+url = "https://example.com/caveman.md"
+```
+
+uniskill downloads `caveman` into the local cache, then creates:
+
+```
+~/.cache/uniskill/remote-skill/skills/caveman → $HOME/.agents/skills/caveman
 ```
 
 Different harnesses use different conventions. The tool knows each harness's expected path pattern and resolves it at runtime using environment variables like `$HOME`.
@@ -83,27 +115,35 @@ Configuration is merged from two layers, allowing seamless interaction between g
 2. **Project Config**: `uniskill.toml` in the current working directory.
 
 ```toml
-# Example uniskill.toml (can be global or project-level)
+# Project-level example with both local and virtual bundles
 
 # Define custom harnesses (optional)
-[harnesses.my-custom-harness]
+[harnesses.agents]
 scope = "project"
 pattern = ".agents/skills/{name}"
 
-# Wire bundles into harnesses
-[[bundles]]
+# Local bundle: source is a path on disk
+[bundles.dev-tools]
 source = "./my-project-skills" # Resolves relative to this config file
-harnesses = ["pi", "my-custom-harness"] # 'pi' is a built-in global
+harnesses = ["pi", "agents"]
+
+# Virtual bundle: skills fetched from URLs
+[bundles.remote-caveman]
+harnesses = ["agents"]
+
+[bundles.remote-caveman.skills.caveman]
+url = "https://raw.githubusercontent.com/example/caveman/main/SKILL.md"
 ```
 
 When `uniskill sync` runs, it:
 1. Loads the built-in default harnesses.
 2. Loads and merges user-defined harnesses from the Global Config.
 3. Loads and merges user-defined harnesses from the Project Config (if present).
-4. Resolves the `source` paths (absolute or relative to the defining config).
-5. Creates symlinks for all declared bundles across all scopes.
+4. Resolves `source` paths for local bundles (absolute or relative to the defining config).
+5. For virtual bundles, downloads each skill URL into a local cache, then treats the cache as a normal bundle source.
+6. Creates symlinks for all declared bundles across all scopes.
 
-The tool auto-discovers skills from the `skills/` subdirectory of each source. No per-skill configuration needed.
+The tool auto-discovers skills from the `skills/` subdirectory of each local bundle source. Virtual bundle skills are downloaded in full and cached; they become real directories once fetched.
 
 ## CLI
 
@@ -157,3 +197,9 @@ A symlink is considered valid when:
 - Its target is not broken (source still present in declared bundles)
 
 The tool does not follow or manage symlinks that it did not create.
+
+## Cache lifecycle (virtual bundles)
+
+Downloaded skills live in a project-local cache (`.uniskill-cache/` relative to the project root) for project configs, or `$XDG_CACHE_HOME/uniskill/` for global config. Cached files persist across sync runs; only changed URLs are re-fetched.
+
+If a user deletes the cache directory, cached skills become broken symlinks — the next `sync` re-downloads them. There is no automatic TTL or size limit in v1.
