@@ -7,7 +7,7 @@ RELEASE_BIN      := target/$(TARGET_TRIPLE)/release/$(PROJECT)
 
 ## Build release binary for the host platform
 .PHONY: build
-build:
+build: fmt-fix
 	@echo ">> building $(TARGET_TRIPLE) (release)"
 	cargo build --release --target $(TARGET_TRIPLE)
 	@echo "✓ → $(RELEASE_BIN)"
