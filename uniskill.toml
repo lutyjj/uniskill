@@ -1,11 +1,6 @@
-# Project-level uniskill config — installs dev skills locally.
-# Demonstrates self-hosting: we use our own tool to wire our own workflow.
-
-[harnesses.dev]
-label = "Dev Harness"
-scope = "project"
-pattern = ".dev-skills/{name}"
+# Project-level config — installs dev skill into the built-in pi harness.
+# We use our own CLI to wire our own workflow: uniskill-dev → ~/.agents/skills/
 
 [[bundles]]
 source = "./uniskill-bundle"
-harnesses = ["dev"]
+harnesses = ["pi"]
