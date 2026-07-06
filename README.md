@@ -1,2 +1,114 @@
-# i-hate-agents-md
-I hate agents md
+# uniskill
+
+Wire skill bundles from one source into multiple agent harnesses via symlinks. One bundle, installed wherever you declare it.
+
+## What it does
+
+uniskill reads a **bundle** (a directory with `meta.toml` and `skills/`) and creates symlinks at each declared harness's expected location. A single bundle can install to the pi harness (`~/.agents/skills/`), claude-code (`~/.claude/skills/`), or any custom harness you define.
+
+Editing a skill in the source bundle updates it everywhere through the symlink. No file copying, no duplication.
+
+## What it does not do
+
+uniskill does not publish bundles, manage individual skill files outside bundles, handle version pinning, or modify harness configuration beyond creating and updating symlinks.
+
+## Quick start
+
+### Install
+
+```bash
+cargo build --release
+cp target/release/uniskill ~/.local/bin/
+```
+
+Or use Docker: `make build` produces the binary via the dev container.
+
+### Configure
+
+Create a global config at `~/.config/uniskill/config.toml`:
+
+```toml
+[[bundles]]
+source = "$HOME/.dotfiles/skills"
+harnesses = ["pi", "claude-code"]
+```
+
+Or a project config at `<repo-root>/uniskill.toml`:
+
+```toml
+[harnesses.agents]
+scope = "project"
+pattern = ".agents/skills/{name}"
+
+[[bundles]]
+source = "./my-bundle"
+harnesses = ["agents"]
+```
+
+### Sync
+
+```bash
+uniskill sync    # wire all declared bundles into their harnesses
+```
+
+Running `sync` twice reports "ok" for every skill — the operation is idempotent. Exit code 1 indicates conflicts or broken symlinks.
+
+## Bundle structure
+
+```
+my-bundle/
+├── meta.toml
+└── skills/
+    └── skill-name/
+        └── SKILL.md
+```
+
+The `skills/` directory is the source of truth. uniskill auto-discovers every subdirectory as a skill — no per-skill configuration needed.
+
+## Config reference
+
+### Global config (`~/.config/uniskill/config.toml`)
+
+Defines bundles and custom harnesses for system-wide use.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `bundles` | array of objects | Bundle declarations with `source` and `harnesses` fields |
+| `harnesses.<name>` | object | Custom harness definition with `scope`, `pattern`, optional `label` |
+
+### Project config (`uniskill.toml`)
+
+Same structure as global config. Automatically discovered in the current working directory. Relative `source` paths resolve against the project root.
+
+Built-in harnesses can be referenced directly by name (e.g., `"pi"`). User-defined harnesses from either config file are merged into the registry before sync runs.
+
+### Environment variable expansion
+
+All paths support `$VAR` and `${VAR}` expansion resolved at runtime. Unresolvable variables produce an error during sync. This makes config portable across machines.
+
+## Built-in harnesses
+
+| Name | Pattern | Scope |
+|------|---------|-------|
+| `pi` | `$HOME/.agents/skills/{name}` | global |
+| `claude-code` | `$HOME/.claude/skills/{name}` | global |
+
+Override any built-in harness by defining it in your config with the same name.
+
+## CLI reference
+
+| Command | Description |
+|---------|-------------|
+| `uniskill sync` | Create or update symlinks for all declared bundles |
+
+## Sync behavior
+
+- **Idempotent**: existing symlinks report "ok" on re-run
+- **Updated**: symlink replaced because it points to the wrong source or is broken
+- **Conflict**: non-symlink file exists at target — skill skipped with warning
+- All unmanaged symlinks remain untouched
+
+## Design docs
+
+- [Design overview](docs/DESIGN.md) — architecture, harness scope, data flow
+- [User journeys](docs/USER_JOURNEY.md) — global setup, project-level skills, custom harnesses
