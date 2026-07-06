@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -107,7 +107,7 @@ fn sync_project(project_config: &config::ProjectConfig, config_dir: PathBuf) -> 
 fn sync_with_registry(
     bundles: &HashMap<String, config::Bundle>,
     registry: &HashMap<String, harnesses::HarnessDef>,
-    cache_dir: &PathBuf,
+    cache_dir: &Path,
 ) -> Result<()> {
     let mut total_ok = 0;
     let mut total_created = 0;

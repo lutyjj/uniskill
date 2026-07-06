@@ -77,14 +77,12 @@ pub fn ensure_skill_symlink(source: &Path, target_dir: &Path) -> SyncResult {
 
     // Create parent directories if needed
     if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            if fs::create_dir_all(parent).is_err() {
-                return SyncResult {
-                    skill_name: skill_name.clone(),
-                    target: target.to_string_lossy().to_string(),
-                    status: SyncStatus::Conflict(target.clone()),
-                };
-            }
+        if !parent.exists() && fs::create_dir_all(parent).is_err() {
+            return SyncResult {
+                skill_name: skill_name.clone(),
+                target: target.to_string_lossy().to_string(),
+                status: SyncStatus::Conflict(target.clone()),
+            };
         }
     }
 

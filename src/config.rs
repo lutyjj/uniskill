@@ -133,8 +133,7 @@ pub fn parse_config<P: AsRef<Path>>(path: P) -> crate::error::Result<Config> {
     }
 
     let content = std::fs::read_to_string(path)?;
-    let config: Config =
-        toml::from_str(&content).map_err(|e| crate::error::AppError::ConfigParse(e))?;
+    let config: Config = toml::from_str(&content).map_err(crate::error::AppError::ConfigParse)?;
     Ok(config)
 }
 
