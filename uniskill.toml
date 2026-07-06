@@ -1,5 +1,5 @@
-# Project-level config — demonstrates virtual bundles.
-# We wire a remote caveman skill into the built-in pi harness alongside our local uniskill-dev skill.
+# Project-level config — everything installs into .agents/skills/ here.
+# Both local and virtual bundles wired into the same project harness.
 
 [harnesses.agents]
 scope = "project"
@@ -8,7 +8,7 @@ pattern = ".agents/skills/{name}"
 # Local bundle: our own development skill, installed project-locally
 [bundles.uniskill-dev-skill]
 source = "./uniskill-bundle"
-harnesses = ["pi"]
+harnesses = ["agents"]
 
 # Virtual bundle: fetch caveman skill from a remote URL
 [bundles.remote-caveman]
