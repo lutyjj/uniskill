@@ -6,21 +6,58 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Bundle {
-    /// Path to local bundle root; takes precedence over `skills` when both are present.
-    pub source: Option<String>,
-
     /// Which harnesses to wire this bundle into.
     pub harnesses: Vec<String>,
 
-    /// Remote skill definitions for virtual bundles.
+    /// Skill definitions keyed by installed skill name.
     #[serde(default)]
     pub skills: HashMap<String, SkillEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct SkillEntry {
-    /// HTTP(S) URL to fetch the skill markdown file.
-    pub url: String,
+    /// HTTP(S) URL to fetch a single SKILL.md file.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Local skill directory.
+    #[serde(default)]
+    pub source: Option<String>,
+
+    /// Git repository containing this skill directory.
+    #[serde(default)]
+    pub repo: Option<String>,
+
+    /// Branch, tag, or commit to check out for this skill's repository.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+
+    /// Skill directory path, relative to the inherited or explicit repo/source.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl SkillEntry {
+    pub fn source_kind(&self) -> SkillSourceKind {
+        match (
+            self.url.is_some(),
+            self.source.is_some(),
+            self.repo.is_some(),
+        ) {
+            (true, false, false) => SkillSourceKind::Url,
+            (false, true, false) => SkillSourceKind::Local,
+            (false, false, true) => SkillSourceKind::Git,
+            _ => SkillSourceKind::Invalid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSourceKind {
+    Url,
+    Local,
+    Git,
+    Invalid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +228,29 @@ pub fn resolve_source_from(source: &str, base_dir: &Path) -> PathBuf {
     }
 }
 
+pub fn resolve_repo_from(repo: &str, base_dir: &Path) -> String {
+    let expanded = expand_env_vars(repo);
+    if is_local_repo_reference(&expanded) {
+        let path = PathBuf::from(expanded);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            base_dir.join(path)
+        };
+        resolved.to_string_lossy().to_string()
+    } else {
+        expanded
+    }
+}
+
+fn is_local_repo_reference(repo: &str) -> bool {
+    repo.starts_with('/')
+        || repo.starts_with("./")
+        || repo.starts_with("../")
+        || repo.starts_with("~/")
+        || repo.starts_with('$')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,15 +267,19 @@ mod tests {
     fn test_parse_minimal_config() {
         let content = r#"
 [bundles.my-skills]
-source = "/tmp/skills"
 harnesses = ["pi"]
+
+[bundles.my-skills.skills.caveman]
+source = "/tmp/skills/caveman"
 "#;
         let file = write_temp_toml(content);
         let config = parse_config(file.path()).unwrap();
         assert_eq!(config.bundles.len(), 1);
         let bundle = config.bundles.get("my-skills").unwrap();
-        assert_eq!(bundle.source.as_deref(), Some("/tmp/skills"));
-        assert!(bundle.skills.is_empty());
+        assert_eq!(
+            bundle.skills["caveman"].source.as_deref(),
+            Some("/tmp/skills/caveman")
+        );
         // No [harnesses] section — empty map; defaults come from harnesses.rs
         assert!(config.harnesses.is_empty());
     }
@@ -246,8 +310,10 @@ harnesses = ["pi"]
     fn test_custom_harness_in_config() {
         let content = r#"
 [bundles.my-bundle]
-source = "/tmp/bundle"
 harnesses = ["my-harness"]
+
+[bundles.my-bundle.skills.example]
+source = "/tmp/bundle/skills/example"
 
 [harnesses.my-harness]
 pattern = "/custom/path/skills/{name}"
@@ -274,8 +340,10 @@ pattern = "/custom/path/skills/{name}"
         // produce an empty harnesses map — defaults come from harnesses.rs
         let content = r#"
 [bundles.my-bundle]
-source = "/tmp/skills"
 harnesses = ["pi"]
+
+[bundles.my-bundle.skills.example]
+source = "/tmp/skills/example"
 "#;
         let file = write_temp_toml(content);
         let config = parse_config(file.path()).unwrap();
@@ -287,8 +355,10 @@ harnesses = ["pi"]
     fn test_custom_harness_with_label() {
         let content = r#"
 [bundles.my-bundle]
-source = "/tmp/bundle"
 harnesses = ["custom"]
+
+[bundles.my-bundle.skills.example]
+source = "/tmp/bundle/skills/example"
 
 [harnesses.custom]
 label = "My Custom Agent"
@@ -330,6 +400,18 @@ pattern = "/opt/custom/skills/{name}"
     }
 
     #[test]
+    fn test_resolve_repo_from_keeps_github_shorthand() {
+        let resolved = resolve_repo_from("lutyjj/agent-skills", Path::new("/repo"));
+        assert_eq!(resolved, "lutyjj/agent-skills");
+    }
+
+    #[test]
+    fn test_resolve_repo_from_joins_relative_local_repo() {
+        let resolved = resolve_repo_from("../skills-repo", Path::new("/repo/config"));
+        assert_eq!(resolved, "/repo/config/../skills-repo");
+    }
+
+    #[test]
     fn test_expand_env_vars_multiple_vars() {
         let home = env::var("HOME").unwrap();
         let result = expand_env_vars("$HOME/.agents/$USER");
@@ -349,8 +431,10 @@ pattern = "/opt/custom/skills/{name}"
         // project_harnesses via serde rename.
         let content = r#"
 [bundles.local-skills]
-source = "./my-skills"
 harnesses = ["local-agent"]
+
+[bundles.local-skills.skills.example]
+source = "./my-skills/example"
 
 [harnesses.local-agent]
 label = "Local Agent"
@@ -362,7 +446,10 @@ pattern = ".agents/skills/{name}"
         let config: ProjectConfig = toml::from_str(&content_bytes).unwrap();
         assert_eq!(config.bundles.len(), 1);
         let bundle = config.bundles.get("local-skills").unwrap();
-        assert_eq!(bundle.source.as_deref(), Some("./my-skills"));
+        assert_eq!(
+            bundle.skills["example"].source.as_deref(),
+            Some("./my-skills/example")
+        );
         assert!(!config.project_harnesses.is_empty());
         let harness = config.project_harnesses.get("local-agent").unwrap();
         assert_eq!(harness.label, Some("Local Agent".to_string()));
@@ -377,7 +464,7 @@ pattern = ".agents/skills/{name}"
     }
 
     #[test]
-    fn test_parse_virtual_bundle_from_toml() {
+    fn test_parse_url_skill_from_toml() {
         let content = r#"
 [bundles.important-stuff]
 harnesses = ["pi"]
@@ -392,26 +479,62 @@ url = "https://example.com/code-design.md"
         let config = parse_config(file.path()).unwrap();
         assert_eq!(config.bundles.len(), 1);
         let bundle = config.bundles.get("important-stuff").unwrap();
-        assert!(bundle.source.is_none());
         assert_eq!(bundle.skills.len(), 2);
         assert!(bundle.skills.contains_key("caveman"));
-        assert_eq!(bundle.skills["caveman"].url, "https://example.com/skill.md");
+        assert_eq!(
+            bundle.skills["caveman"].url.as_deref(),
+            Some("https://example.com/skill.md")
+        );
     }
 
     #[test]
-    fn test_parse_mixed_bundle_from_toml() {
+    fn test_parse_git_skill_from_toml() {
+        let content = r#"
+[bundles.generic]
+harnesses = ["pi", "claude-code"]
+
+[bundles.generic.skills.code-design]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic/skills/code-design"
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        let bundle = config.bundles.get("generic").unwrap();
+        let skill = &bundle.skills["code-design"];
+        assert_eq!(skill.repo.as_deref(), Some("gh:lutyjj/agent-skills"));
+        assert_eq!(skill.git_ref.as_deref(), Some("main"));
+        assert_eq!(
+            skill.path.as_deref(),
+            Some("bundles/generic/skills/code-design")
+        );
+        assert_eq!(bundle.harnesses, vec!["pi", "claude-code"]);
+        assert_eq!(skill.source_kind(), SkillSourceKind::Git);
+    }
+
+    #[test]
+    fn test_parse_mixed_skill_sources_from_toml() {
         let content = r#"
 [bundles.mixed-bundle]
-source = "/local/path"
 harnesses = ["pi"]
 
 [bundles.mixed-bundle.skills.remote-skill]
 url = "https://example.com/remote.md"
+
+[bundles.mixed-bundle.skills.local-skill]
+source = "/local/path/skills/local-skill"
 "#;
         let file = write_temp_toml(content);
         let config = parse_config(file.path()).unwrap();
         let bundle = config.bundles.get("mixed-bundle").unwrap();
-        assert_eq!(bundle.source.as_deref(), Some("/local/path"));
-        assert_eq!(bundle.skills.len(), 1);
+        assert_eq!(bundle.skills.len(), 2);
+        assert_eq!(
+            bundle.skills["remote-skill"].source_kind(),
+            SkillSourceKind::Url
+        );
+        assert_eq!(
+            bundle.skills["local-skill"].source_kind(),
+            SkillSourceKind::Local
+        );
     }
 }

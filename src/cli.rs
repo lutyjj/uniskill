@@ -26,8 +26,8 @@ enum Commands {
     Sync {},
 }
 
-/// Default cache directory for virtual bundles (relative to XDG_CACHE_HOME).
-const VIRTUAL_BUNDLE_CACHE: &str = "uniskill";
+/// Default cache directory for assembled bundles (relative to XDG_CACHE_HOME).
+const DEFAULT_CACHE_DIR: &str = "uniskill";
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -79,9 +79,9 @@ fn sync_from_path(config_path: PathBuf) -> Result<()> {
         );
     }
 
-    // Resolve cache directory for virtual bundles.
+    // Resolve cache directory for assembled bundles.
     let cache_dir = dirs::cache_dir()
-        .map(|d| d.join(VIRTUAL_BUNDLE_CACHE))
+        .map(|d| d.join(DEFAULT_CACHE_DIR))
         .unwrap_or_else(|| PathBuf::from("./.uniskill-cache"));
 
     sync_with_registry(&config.bundles, &registry, &cache_dir, &config_dir)
@@ -103,7 +103,7 @@ fn sync_project(project_config: &config::ProjectConfig, config_dir: PathBuf) -> 
         );
     }
 
-    // Use project-local cache directory for virtual bundles.
+    // Use project-local cache directory for assembled bundles.
     let cache_dir = config_dir.join(".uniskill-cache");
 
     sync_with_registry(&project_config.bundles, &registry, &cache_dir, &config_dir)
@@ -123,20 +123,17 @@ fn sync_with_registry(
     let mut total_conflict = 0;
 
     for (bundle_name, bundle) in bundles {
-        // Resolve the bundle source: local path or virtual cache.
-        let source = match &bundle.source {
-            Some(path) => config::resolve_source_from(path, source_base_dir),
-            None if !bundle.skills.is_empty() => {
-                fetcher::assemble_virtual_bundle(bundle_name, &bundle.skills, cache_dir)?
-            }
-            _ => {
-                println!(
-                    "  ! bundle '{}' has neither source nor skills — skipping",
-                    bundle_name,
-                );
-                total_conflict += 1;
-                continue;
-            }
+        let source = if bundle.skills.is_empty() {
+            println!("  ! bundle '{}' has no skills — skipping", bundle_name,);
+            total_conflict += 1;
+            continue;
+        } else {
+            fetcher::assemble_explicit_bundle(
+                bundle_name,
+                &bundle.skills,
+                cache_dir,
+                source_base_dir,
+            )?
         };
 
         // Validate that all declared harnesses exist in the registry.

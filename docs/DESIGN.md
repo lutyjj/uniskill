@@ -1,202 +1,155 @@
-# Design — uniskill
+# Design - uniskill
 
-uniskill wires skill bundles from their source directory into multiple agent harnesses via symlinks. One bundle, installed to whatever harnesses you declare. The tool handles path resolution automatically.
+uniskill wires named groups of skills into agent harnesses by symlinking from an
+assembled cache. The config is explicit: bundles choose destinations, and skills
+choose sources.
 
-> See [USER_JOURNEY.md](USER_JOURNEY.md) for concrete examples of global, project-level, and custom harness workflows.
+> See [USER_JOURNEY.md](USER_JOURNEY.md) for concrete global, project-level, and
+> custom harness workflows.
 
 ## Scope
 
-uniskill manages **skill bundles**. A bundle is a self-contained directory with a `meta.toml` and a `skills/` subdirectory. The tool reads the bundle, discovers its skills, and creates symlinks at each harness's expected location.
+uniskill manages skill installation paths. It does not publish skills, solve
+versions, infer a repository layout, or edit harness configuration files.
 
-uniskill does not:
-- Manage individual skill files outside of bundles
-- Publish or distribute bundles (though bundles can be shared manually)
-- Modify existing harness configuration beyond creating/removing symlinks
-- Handle version pinning or semver resolution
+## Core Model
 
-## Fundamental entity: bundle
+### Bundle
 
-A bundle is a group of skills wired into one or more harnesses. A bundle can be **local** (a source directory on disk) or **virtual** (skills fetched from remote URLs).
-
-### Local bundle
-
-Source directory structure:
-
-```
-bundle-name/
-├── meta.toml (optional)
-└── skills/
-    └── <skill-name>/
-        └── SKILL.md
-```
-
-uniskill auto-discovers all subdirectories of `skills/` as skill sources. No manual listing required.
-
-### Virtual bundle
-
-Skills defined by URL instead of a local directory:
+A bundle is a routing layer:
 
 ```toml
-[bundles.remote-skill]
-harnesses = ["pi"]
-
-[bundles.remote-skill.skills.caveman]
-url = "https://example.com/skills/caveman/SKILL.md"
-```
-
-uniskill downloads each URL into a local cache (`~/.cache/uniskill/` for global config, `.uniskill-cache/` relative to project root for project-level config), then wires the cached files into harnesses exactly like local bundles. Cached skills survive across sync runs — only changed URLs are re-fetched.
-
-### Bundle config key
-
-Bundles use `[bundles.<name>]` (map) rather than `[[bundles]]` (array). Each map key is the bundle name and becomes part of downstream paths (cache directory, log messages). This lets multiple bundles coexist in one config without ambiguity, and keeps skill entries grouped under their bundle.
-
-## Installation model
-
-You declare bundles under `[bundles.<name>]` and specify which harnesses to wire them into. The harness registry resolves target paths.
-
-### Local bundle example
-
-```toml
-[bundles.my-skills]
-source = "/home/user/repos/my-skills"
+[bundles.generic]
 harnesses = ["pi", "claude-code"]
 ```
 
-The tool creates symlinks:
+The bundle key is stable identity for logging and cache paths. It is not a
+source path. This lets a bundle mix local, URL, and git-backed skills while
+retaining one destination policy.
 
-```
-/home/user/repos/my-skills/skills/caveman → $HOME/.agents/skills/caveman (for pi)
-/home/user/repos/my-skills/skills/caveman → $HOME/.claude/skills/caveman  (for claude-code)
-```
+### Skill
 
-### Virtual bundle example
+A skill entry is keyed by the installed skill name:
 
 ```toml
-[bundles.remote-skill]
-harnesses = ["pi"]
-
-[bundles.remote-skill.skills.caveman]
-url = "https://example.com/caveman.md"
+[bundles.generic.skills.code-design]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic/skills/code-design"
 ```
 
-uniskill downloads `caveman` into the local cache, then creates:
+Each skill must declare exactly one source kind:
 
+- `source`: local skill directory
+- `url`: HTTP(S) URL to one `SKILL.md`
+- `repo`: git repository containing the skill directory
+
+Git-backed skills require `path`, relative to the repository root. Paths that
+are absolute or escape with `..` are rejected.
+
+## Source Types
+
+### Local Skill
+
+```toml
+[bundles.project.skills.release-helper]
+source = "./skills/release-helper"
 ```
-~/.cache/uniskill/remote-skill/skills/caveman → $HOME/.agents/skills/caveman
+
+The source directory must contain `SKILL.md`. Relative paths resolve against the
+config file's directory.
+
+### URL Skill
+
+```toml
+[bundles.generic.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
 ```
 
-Different harnesses use different conventions. The tool knows each harness's expected path pattern and resolves it at runtime using environment variables like `$HOME`.
+The URL body is cached as `SKILL.md`. URL skills cannot carry companion files
+unless those files are later represented as a richer source type.
 
-## Harness definitions & Scopes
+### Git Skill
 
-A harness defines where a particular agent expects its skills to live. Instead of a hardcoded registry, harnesses are configured dynamically. `uniskill` ships with built-in defaults for known global harnesses, but users can extend or override them.
+```toml
+[bundles.generic.skills.technical-writing]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic/skills/technical-writing"
+```
 
-Scope is derived from the config file that declares the harness:
-- **Global config**: Patterns are used as declared, typically absolute or rooted in `$HOME`.
-- **Project config**: Custom harness patterns are resolved relative to the project root.
+uniskill clones or fetches the repository into the cache, checks out `ref` when
+provided, and copies the selected skill directory into the assembled bundle.
 
-Users can define custom harnesses directly in their configuration files:
+GitHub shorthands (`owner/repo`, `gh:owner/repo`, `github:owner/repo`) resolve
+to SSH URLs. Plain SSH, HTTPS, and local git paths are passed through.
+
+## Harnesses
+
+A harness defines where an agent expects a skill directory to exist:
 
 ```toml
 [harnesses.company-agent]
+label = "Company Agent"
 pattern = "$HOME/.company-agent/skills/{name}"
-
-[harnesses.local-claude]
-pattern = ".claude/skills/{name}"
 ```
 
-## Config format & Resolution
+`{name}` is replaced with the skill key. Built-in harnesses are loaded first and
+user config can override them.
 
-Configuration is merged from two layers, allowing seamless interaction between global tools and project-specific agents:
+Built-ins:
 
-1. **Global Config**: `~/.config/uniskill/config.toml` (or `--config`)
-2. **Project Config**: `uniskill.toml` in the current working directory.
+| Name | Pattern |
+|------|---------|
+| `pi` | `$HOME/.agents/skills/{name}` |
+| `claude-code` | `$HOME/.claude/skills/{name}` |
 
-```toml
-# Project-level example with both local and virtual bundles
+## Config Resolution
 
-# Define custom harnesses (optional)
-[harnesses.agents]
-pattern = ".agents/skills/{name}"
+Global config is read from `~/.config/uniskill/config.toml`, unless `--config`
+is provided. Project config is `uniskill.toml` in the current working directory.
 
-# Local bundle: source is a path on disk
-[bundles.dev-tools]
-source = "./my-project-skills" # Resolves relative to this config file
-harnesses = ["pi", "agents"]
+Relative paths resolve against the config that declared them:
 
-# Virtual bundle: skills fetched from URLs
-[bundles.remote-caveman]
-harnesses = ["agents"]
+- `source` for local skills
+- local `repo` values such as `../agent-skills`
+- project harness patterns such as `.agents/skills/{name}`
 
-[bundles.remote-caveman.skills.caveman]
-url = "https://raw.githubusercontent.com/example/caveman/main/SKILL.md"
+Environment variables use `$VAR` and `${VAR}` syntax. Unresolvable variables are
+left unchanged.
+
+## Data Flow
+
+1. Load built-in harnesses.
+2. Load config and merge custom harnesses.
+3. For each bundle, clear and recreate its assembled cache directory.
+4. For each skill, fetch or copy its declared source into the bundle cache.
+5. For each bundle-harness pair, create or update symlinks to cached skills.
+
+Global cache lives under `$XDG_CACHE_HOME/uniskill/` when available, otherwise
+`./.uniskill-cache`. Project config uses `.uniskill-cache/` next to the project
+config.
+
+Assembled bundle layout:
+
+```text
+cache/
+└── bundles/
+    └── generic/
+        └── skills/
+            └── code-design/
+                └── SKILL.md
 ```
 
-When `uniskill sync` runs, it:
-1. Loads the built-in default harnesses.
-2. Loads and merges user-defined harnesses from the Global Config.
-3. Loads and merges user-defined harnesses from the Project Config (if present).
-4. Resolves `source` paths for local bundles (absolute or relative to the defining config).
-5. For virtual bundles, downloads each skill URL into a local cache, then treats the cache as a normal bundle source.
-6. Creates symlinks for all declared bundles across all scopes.
+Git repositories are cached separately under `cache/repos/`.
 
-The tool auto-discovers skills from the `skills/` subdirectory of each local bundle source. Virtual bundle skills are downloaded in full and cached; they become real directories once fetched.
+## Symlink Strategy
 
-## CLI
+Symlinks point at absolute paths inside the assembled cache. A sync run:
 
-```bash
-uniskill sync           # create/update symlinks for all declared bundles
-uniskill status         # show current symlink state vs expected
-uniskill init <harness> # detect harness installation and add to registry
-```
+- creates missing symlinks
+- keeps symlinks that already point at the expected source
+- updates symlinks pointing elsewhere
+- refuses to replace non-symlink files or directories
 
-`sync` creates missing symlinks, updates broken ones, and leaves unmanaged symlinks untouched. Running it twice is idempotent.
-
-`status` reports which skills are linked, which are expected but not linked, and which exist as stale symlinks (source bundle removed from config).
-
-## Data flow
-
-1. User edits `config.toml` to declare bundles and harnesses
-2. User runs `uniskill sync`
-3. Tool reads config, resolves harness patterns with env vars
-4. For each bundle-harness pair, tool creates or updates the symlink
-5. The symlink points to the actual skill directory in the bundle
-6. Harness reads the skill through the symlink — no duplication
-
-## Example: end-to-end
-
-User has a skill repo at `/home/user/.dotfiles/skills/` with `meta.toml` and several skills. Config declares it for two harnesses:
-
-```toml
-[bundles.my-skills]
-source = "$HOME/.dotfiles/skills"
-harnesses = ["pi", "claude-code"]
-```
-
-After `uniskill sync`:
-
-- `/home/user/.agents/skills/caveman` → symlink to `/home/user/.dotfiles/skills/skills/caveman`
-- `/home/user/.claude/skills/caveman` → same target
-- Editing the skill in one place updates it everywhere
-
-## Environment variable expansion
-
-All `source` paths and harness patterns support `$VAR` and `${VAR}` expansion. The tool resolves variables from the current process environment at runtime. This makes config portable across machines without manual editing.
-
-Supported variables: `$HOME`, `$USER`, `$PATH`, or any other env var. Unresolvable variables are left unchanged.
-
-## Symlink strategy
-
-Symlinks are absolute paths. They survive directory moves and work across tool invocations. The tool recreates symlinks on each sync to handle source bundle relocation gracefully.
-
-A symlink is considered valid when:
-- Its target exists
-- Its target is not broken (source still present in declared bundles)
-
-The tool does not follow or manage symlinks that it did not create.
-
-## Cache lifecycle (virtual bundles)
-
-Downloaded skills live in a project-local cache (`.uniskill-cache/` relative to the project root) for project configs, or `$XDG_CACHE_HOME/uniskill/` for global config. Cached files persist across sync runs; only changed URLs are re-fetched.
-
-If a user deletes the cache directory, cached skills become broken symlinks — the next `sync` re-downloads them. There is no automatic TTL or size limit in v1.
+Unmanaged symlinks remain untouched unless they conflict with a declared target.

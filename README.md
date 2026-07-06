@@ -1,25 +1,36 @@
 # uniskill
 
-Wire skill bundles from one source into multiple agent harnesses via symlinks. One bundle, installed wherever you declare it.
+Wire named skill groups into multiple agent harnesses. A bundle is a routing
+layer: it names a set of skills and says which harnesses receive them. Each
+skill declares its own source.
 
-## What it does
+## What It Does
 
-uniskill reads a **bundle** (a directory with `meta.toml` and `skills/`) and creates symlinks at each declared harness's expected location. A single bundle can install to the pi harness (`~/.agents/skills/`), claude-code (`~/.claude/skills/`), or any custom harness you define.
+uniskill reads a config file, assembles each declared bundle into a local cache,
+and creates symlinks at every target harness path. A single bundle can install to
+the Pi harness (`~/.agents/skills/`), Claude Code (`~/.claude/skills/`), or any
+custom harness you define.
 
-Editing a skill in the source bundle updates it everywhere through the symlink. No file copying, no duplication.
+Skill sources can be mixed inside the same bundle:
 
-## What it does not do
+- `source`: local skill directory containing `SKILL.md`
+- `url`: HTTP(S) URL for a single `SKILL.md`
+- `repo` + `path`: skill directory inside a git repository
 
-uniskill does not publish bundles, manage individual skill files outside bundles, handle version pinning, or modify harness configuration beyond creating and updating symlinks.
+## What It Does Not Do
 
-## Quick start
+uniskill does not publish skills, infer whole repositories automatically, handle
+semver dependency solving, or modify harness configuration beyond creating and
+updating symlinks.
+
+## Quick Start
 
 ### Install
 
 **From source (requires [rustup](https://rustup.rs/)):**
 
 ```bash
-make install          # builds release binary and copies to ~/.local/bin/
+make install
 ```
 
 Or manually:
@@ -37,10 +48,10 @@ preserving executable metadata:
 
 ```bash
 mkdir -p ~/.local/bin
-install -m 755 uniskill-darwin-arm64-v0.1.0 ~/.local/bin/uniskill
+install -m 755 uniskill-darwin-arm64-v<version> ~/.local/bin/uniskill
 
 # Or use the tarball:
-tar xzf uniskill-darwin-arm64-v0.1.0.tar.gz
+tar xzf uniskill-darwin-arm64-v<version>.tar.gz
 mv uniskill ~/.local/bin/
 ```
 
@@ -49,79 +60,103 @@ mv uniskill ~/.local/bin/
 Create a global config at `~/.config/uniskill/config.toml`:
 
 ```toml
-[bundles.my-skills]
-source = "$HOME/.dotfiles/skills"
+[bundles.generic]
 harnesses = ["pi", "claude-code"]
+
+[bundles.generic.skills.code-design]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic/skills/code-design"
+
+[bundles.generic.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
 ```
 
 Or a project config at `<repo-root>/uniskill.toml`:
 
 ```toml
-[harnesses.agents]
+[harnesses.local-agent]
 pattern = ".agents/skills/{name}"
 
-[bundles.my-bundle]
-source = "./my-bundle"
-harnesses = ["agents"]
+[bundles.project-tools]
+harnesses = ["local-agent"]
+
+[bundles.project-tools.skills.release-helper]
+source = "./skills/release-helper"
 ```
 
 ### Sync
 
 ```bash
-uniskill sync    # wire all declared bundles into their harnesses
+uniskill sync
 ```
 
-Running `sync` twice reports "ok" for every skill — the operation is idempotent. Exit code 1 indicates conflicts or broken symlinks.
+Running `sync` twice reports "ok" for every already-correct skill. Exit code 1
+indicates conflicts or broken symlinks.
 
-## Bundle structure
+## Skill Structure
 
+Local and git-backed skills point at a skill directory:
+
+```text
+skill-name/
+├── SKILL.md
+└── agents/
+    └── openai.yaml
 ```
-my-bundle/
-├── meta.toml
-└── skills/
-    └── skill-name/
-        └── SKILL.md
-```
 
-The `skills/` directory is the source of truth. uniskill auto-discovers every subdirectory as a skill — no per-skill configuration needed.
+Only `SKILL.md` is required. Extra files are copied into the cache and exposed to
+the harness through the symlink.
 
-## Config reference
+URL-backed skills fetch a single `SKILL.md` into the cache.
 
-### Global config (`~/.config/uniskill/config.toml`)
+## Config Reference
 
-Defines bundles and custom harnesses for system-wide use.
+### Global Config
+
+Global config lives at `~/.config/uniskill/config.toml` unless `--config` is
+provided.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `bundles.<name>` | object | Bundle declaration with `source` and `harnesses` fields |
-| `harnesses.<name>` | object | Custom harness definition with `pattern` and optional `label` |
+| `bundles.<bundle>.harnesses` | array | Harness names that receive this bundle |
+| `bundles.<bundle>.skills.<skill>.source` | string | Local skill directory |
+| `bundles.<bundle>.skills.<skill>.url` | string | HTTP(S) URL for `SKILL.md` |
+| `bundles.<bundle>.skills.<skill>.repo` | string | Git repository containing the skill |
+| `bundles.<bundle>.skills.<skill>.ref` | string | Optional branch, tag, or commit |
+| `bundles.<bundle>.skills.<skill>.path` | string | Skill directory path inside `repo` |
+| `harnesses.<name>.pattern` | string | Target pattern containing `{name}` |
+| `harnesses.<name>.label` | string | Optional display label |
 
-### Project config (`uniskill.toml`)
+Each skill must declare exactly one source kind: `source`, `url`, or `repo`.
+Git-backed skills must also declare `path`.
 
-Same structure as global config. Automatically discovered in the current working directory. Relative `source` paths resolve against the project root.
+GitHub shorthands such as `owner/repo`, `gh:owner/repo`, and
+`github:owner/repo` resolve to SSH URLs. Plain SSH, HTTPS, and local git paths
+are passed through.
 
-Built-in harnesses can be referenced directly by name (e.g., `"pi"`). User-defined harnesses from either config file are merged into the registry before sync runs.
+### Project Config
 
-### Environment variable expansion
+Project config is `uniskill.toml` in the current working directory. Relative
+`source`, local `repo`, and custom harness paths resolve against the project
+root.
 
-All paths support `$VAR` and `${VAR}` expansion resolved at runtime. Unresolvable variables are left unchanged, so use environment variables that are guaranteed to exist on the target machine.
+Built-in harnesses can be referenced directly by name. User-defined harnesses
+override built-ins with the same name.
 
-## Built-in harnesses
+## Environment Variables
+
+Paths support `$VAR` and `${VAR}` expansion. Unresolvable variables are left
+unchanged, so use variables that exist on every target machine.
+
+## Built-In Harnesses
 
 | Name | Pattern | Scope |
 |------|---------|-------|
 | `pi` | `$HOME/.agents/skills/{name}` | global |
 | `claude-code` | `$HOME/.claude/skills/{name}` | global |
 
-Override any built-in harness by defining it in your config with the same name.
-
-## CLI reference
-
-| Command | Description |
-|---------|-------------|
-| `uniskill sync` | Create or update symlinks for all declared bundles |
-
-## Release process
+## Release Process
 
 `make release` is the local release gate. It checks formatting, runs clippy,
 runs tests, builds the release binary, and writes distributable assets to
@@ -135,14 +170,14 @@ Tag releases with `v<version>` matching `Cargo.toml`. The GitHub release
 workflow runs the same gate for each supported target, publishes raw binaries,
 tarballs, and `checksums-sha256.txt`.
 
-## Sync behavior
+## Sync Behavior
 
 - **Idempotent**: existing symlinks report "ok" on re-run
 - **Updated**: symlink replaced because it points to the wrong source or is broken
-- **Conflict**: non-symlink file exists at target — skill skipped with warning
-- All unmanaged symlinks remain untouched
+- **Conflict**: non-symlink file exists at target, so the skill is skipped
+- Unmanaged symlinks remain untouched
 
-## Design docs
+## Design Docs
 
-- [Design overview](docs/DESIGN.md) — architecture, harness scope, data flow
-- [User journeys](docs/USER_JOURNEY.md) — global setup, project-level skills, custom harnesses
+- [Design overview](docs/DESIGN.md)
+- [User journeys](docs/USER_JOURNEY.md)

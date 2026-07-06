@@ -1,9 +1,22 @@
 # uniskill configuration
 # Place this at ~/.config/uniskill/config.toml or pass --config
 
-[bundles.my-skills]
-source = "$HOME/.dotfiles/skills"
+[bundles.generic]
 harnesses = ["pi", "claude-code"]
+
+# Skill from a private git repository. GitHub shorthands use SSH.
+[bundles.generic.skills.code-design]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic/skills/code-design"
+
+# Skill from a raw SKILL.md URL.
+[bundles.generic.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
+
+# Skill from a local directory.
+[bundles.generic.skills.local-example]
+source = "$HOME/.dotfiles/skills/local-example"
 
 [harnesses.my-custom-harness]
 label = "My Custom Harness"
