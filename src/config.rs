@@ -5,21 +5,32 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-pub struct Config {
-    #[serde(default)]
-    pub bundles: Vec<Bundle>,
+pub struct Bundle {
+    /// Path to local bundle root; ignored when skills is present.
+    pub source: Option<String>,
 
+    /// Which harnesses to wire this bundle into.
+    pub harnesses: Vec<String>,
+
+    /// Remote skill definitions for virtual bundles.
     #[serde(default)]
-    pub harnesses: HashMap<String, Harness>,
+    pub skills: HashMap<String, SkillEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Bundle {
-    /// Path to the bundle root (supports env var expansion)
-    pub source: String,
+pub struct SkillEntry {
+    /// HTTP(S) URL to fetch the skill markdown file.
+    pub url: String,
+}
 
-    /// Which harnesses to wire this bundle into
-    pub harnesses: Vec<String>,
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    /// Bundle definitions keyed by bundle name.
+    #[serde(default)]
+    pub bundles: HashMap<String, Bundle>,
+
+    #[serde(default)]
+    pub harnesses: HashMap<String, Harness>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,8 +58,9 @@ pub struct LocalHarness {
 /// Minimal config for project-level `uniskill.toml`.
 #[derive(Debug, Deserialize)]
 pub struct ProjectConfig {
+    /// Bundle definitions keyed by bundle name.
     #[serde(default)]
-    pub bundles: Vec<Bundle>,
+    pub bundles: HashMap<String, Bundle>,
 
     /// Local harness definitions with relative patterns;
     /// deserialises from the `[harnesses.XXX]` TOML key to match DESIGN.md.
@@ -145,7 +157,11 @@ pub fn discover_project_config() -> Option<ProjectConfig> {
 /// Resolve a bundle's source path after env var expansion.
 pub fn resolve_source(source: &str) -> PathBuf {
     let expanded = expand_env_vars(source);
-    PathBuf::from(expanded)
+    if expanded.is_empty() {
+        PathBuf::new()
+    } else {
+        PathBuf::from(expanded)
+    }
 }
 
 
@@ -164,14 +180,16 @@ mod tests {
     #[test]
     fn test_parse_minimal_config() {
         let content = r#"
-[[bundles]]
+[bundles.my-skills]
 source = "/tmp/skills"
 harnesses = ["pi"]
 "#;
         let file = write_temp_toml(content);
         let config = parse_config(file.path()).unwrap();
         assert_eq!(config.bundles.len(), 1);
-        assert_eq!(config.bundles[0].source, "/tmp/skills");
+        let bundle = config.bundles.get("my-skills").unwrap();
+        assert_eq!(bundle.source.as_deref(), Some("/tmp/skills"));
+        assert!(bundle.skills.is_empty());
         // No [harnesses] section — empty map; defaults come from harnesses.rs
         assert!(config.harnesses.is_empty());
     }
@@ -198,7 +216,7 @@ harnesses = ["pi"]
     #[test]
     fn test_custom_harness_in_config() {
         let content = r#"
-[[bundles]]
+[bundles.my-bundle]
 source = "/tmp/bundle"
 harnesses = ["my-harness"]
 
@@ -223,7 +241,7 @@ pattern = "/custom/path/skills/{name}"
         // After removing default_harnesses from config.rs, empty config should
         // produce an empty harnesses map — defaults come from harnesses.rs
         let content = r#"
-[[bundles]]
+[bundles.my-bundle]
 source = "/tmp/skills"
 harnesses = ["pi"]
 "#;
@@ -236,7 +254,7 @@ harnesses = ["pi"]
     #[test]
     fn test_custom_harness_with_label() {
         let content = r#"
-[[bundles]]
+[bundles.my-bundle]
 source = "/tmp/bundle"
 harnesses = ["custom"]
 
@@ -283,7 +301,7 @@ pattern = "/opt/custom/skills/{name}"
         // Project-level TOML uses [harnesses.XXX] which deserialises into
         // project_harnesses via serde rename.
         let content = r#"
-[[bundles]]
+[bundles.local-skills]
 source = "./my-skills"
 harnesses = ["local-agent"]
 
@@ -296,10 +314,50 @@ pattern = ".agents/skills/{name}"
         // Deserialize as ProjectConfig directly
         let config: ProjectConfig = toml::from_str(&content_bytes).unwrap();
         assert_eq!(config.bundles.len(), 1);
-        assert_eq!(config.bundles[0].source, "./my-skills");
+        let bundle = config.bundles.get("local-skills").unwrap();
+        assert_eq!(bundle.source.as_deref(), Some("./my-skills"));
         assert!(!config.project_harnesses.is_empty());
         let harness = config.project_harnesses.get("local-agent").unwrap();
         assert_eq!(harness.label, Some("Local Agent".to_string()));
         assert_eq!(harness.pattern, ".agents/skills/{name}");
+    }
+
+    #[test]
+    fn test_parse_virtual_bundle_from_toml() {
+        let content = r#"
+[bundles.important-stuff]
+harnesses = ["pi"]
+
+[bundles.important-stuff.skills.caveman]
+url = "https://example.com/skill.md"
+
+[bundles.important-stuff.skills.code-design]
+url = "https://example.com/code-design.md"
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        assert_eq!(config.bundles.len(), 1);
+        let bundle = config.bundles.get("important-stuff").unwrap();
+        assert!(bundle.source.is_none());
+        assert_eq!(bundle.skills.len(), 2);
+        assert!(bundle.skills.contains_key("caveman"));
+        assert_eq!(bundle.skills["caveman"].url, "https://example.com/skill.md");
+    }
+
+    #[test]
+    fn test_parse_mixed_bundle_from_toml() {
+        let content = r#"
+[bundles.mixed-bundle]
+source = "/local/path"
+harnesses = ["pi"]
+
+[bundles.mixed-bundle.skills.remote-skill]
+url = "https://example.com/remote.md"
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        let bundle = config.bundles.get("mixed-bundle").unwrap();
+        assert_eq!(bundle.source.as_deref(), Some("/local/path"));
+        assert_eq!(bundle.skills.len(), 1);
     }
 }

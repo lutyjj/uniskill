@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod error;
+mod fetcher;
 mod harnesses;
 mod linker;
 

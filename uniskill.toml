@@ -1,10 +1,18 @@
-# Project-level config — installs dev skill into a local harness scoped to this repo.
-# The skill lives at .agents/skills/uniskill-dev inside the project, not globally.
+# Project-level config — demonstrates virtual bundles.
+# We wire a remote caveman skill into the built-in pi harness alongside our local uniskill-dev skill.
 
 [harnesses.agents]
 scope = "project"
 pattern = ".agents/skills/{name}"
 
-[[bundles]]
+# Local bundle: our own development skill, installed project-locally
+[bundles.uniskill-dev-skill]
 source = "./uniskill-bundle"
+harnesses = ["pi"]
+
+# Virtual bundle: fetch caveman skill from a remote URL
+[bundles.remote-caveman]
 harnesses = ["agents"]
+
+[bundles.remote-caveman.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"

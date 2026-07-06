@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::config;
-
+use crate::fetcher;
 use crate::harnesses;
 use crate::linker;
 
@@ -25,6 +25,9 @@ enum Commands {
     /// Create or update symlinks for all declared bundles.
     Sync {},
 }
+
+/// Default cache directory for virtual bundles (relative to XDG_CACHE_HOME).
+const VIRTUAL_BUNDLE_CACHE: &str = "uniskill";
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -64,13 +67,16 @@ fn sync_from_path(config_path: PathBuf) -> Result<()> {
         );
     }
 
-    sync_with_registry(&config.bundles, &registry)
+    // Resolve cache directory for virtual bundles.
+    let cache_dir = dirs::cache_dir()
+        .map(|d| d.join(VIRTUAL_BUNDLE_CACHE))
+        .unwrap_or_else(|| PathBuf::from("./.uniskill-cache"));
+
+    sync_with_registry(&config.bundles, &registry, &cache_dir)
 }
 
 /// Sync using a project-local config with relative paths.
 fn sync_project(project_config: &config::ProjectConfig, config_dir: PathBuf) -> Result<()> {
-    // For `uniskill.toml` in CWD, the project root IS CWD itself.
-
     // Build registry from project-local harnesses
     let mut registry = harnesses::default_harnesses();
     for (name, local_harness) in &project_config.project_harnesses {
@@ -82,26 +88,17 @@ fn sync_project(project_config: &config::ProjectConfig, config_dir: PathBuf) -> 
         );
     }
 
-    // Resolve bundle sources relative to the config directory
-    let bundles: Vec<config::Bundle> = project_config.bundles.iter().map(|b| {
-        let source = if PathBuf::from(&b.source).is_absolute() {
-            b.source.clone()
-        } else {
-            let joined = config_dir.join(&b.source);
-            // Normalise — strip leading "./" components so paths read cleanly
-            let norm = joined.components().filter(|c| *c != std::path::Component::CurDir).collect::<PathBuf>();
-            norm.to_string_lossy().to_string()
-        };
-        config::Bundle { source, harnesses: b.harnesses.clone() }
-    }).collect();
+    // Use project-local cache directory for virtual bundles.
+    let cache_dir = config_dir.join(".uniskill-cache");
 
-    sync_with_registry(&bundles, &registry)
+    sync_with_registry(&project_config.bundles, &registry, &cache_dir)
 }
 
 /// Shared logic: iterate bundles and wire them into the registry.
 fn sync_with_registry(
-    bundles: &[config::Bundle],
+    bundles: &HashMap<String, config::Bundle>,
     registry: &HashMap<String, harnesses::HarnessDef>,
+    cache_dir: &PathBuf,
 ) -> Result<()> {
     let mut total_ok = 0;
     let mut total_created = 0;
@@ -109,24 +106,33 @@ fn sync_with_registry(
     let mut total_broken = 0;
     let mut total_conflict = 0;
 
-    for bundle in bundles {
-        let source = config::resolve_source(&bundle.source);
-        eprintln!("[debug] Bundle source: {:?}, exists={}", source, source.exists());
+    for (bundle_name, bundle) in bundles {
+        // Resolve the bundle source: local path or virtual cache.
+        let source = match &bundle.source {
+            Some(path) => config::resolve_source(path),
+            None if !bundle.skills.is_empty() => {
+                fetcher::assemble_virtual_bundle(bundle_name, &bundle.skills, cache_dir)?
+            }
+            _ => {
+                eprintln!("[debug] Bundle '{}' has neither source nor skills — skipping", bundle_name);
+                continue;
+            }
+        };
 
-        // Validate that all declared harnesses exist in the registry
+        // Validate that all declared harnesses exist in the registry.
         for harness_name in &bundle.harnesses {
             if !registry.contains_key(harness_name) {
                 eprintln!("[debug] Unknown harness: {}", harness_name);
                 println!(
                     "  ⚠ bundle '{}': unknown harness '{}' — skipping",
-                    bundle.source, harness_name
+                    bundle_name, harness_name
                 );
                 total_conflict += 1;
                 continue;
             }
 
             let harness = registry.get(harness_name).unwrap();
-            eprintln!("[debug] Syncing {} into {} ({})", bundle.source, harness.label, harness.pattern);
+            eprintln!("[debug] Syncing {} into {} ({})", source.display(), harness.label, harness.pattern);
             let results = linker::sync_bundle(&source, &harness.pattern);
             eprintln!("[debug] Got {} results", results.len());
 
@@ -167,7 +173,7 @@ fn sync_with_registry(
     println!();
     print_status(total_ok, total_created, total_updated, total_broken, total_conflict);
 
-    // Exit with error if there were conflicts (non-zero exit code)
+    // Exit with error if there were conflicts (non-zero exit code).
     if total_conflict > 0 || total_broken > 0 {
         Err(anyhow::anyhow!(
             "sync completed with {} conflict(s) and {} broken link(s)",
