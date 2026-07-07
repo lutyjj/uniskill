@@ -1,29 +1,32 @@
 # uniskill User Journeys
 
 These examples show the intended config shape: bundles group skills for a set of
-harnesses, while each skill declares its own source.
+harnesses. A bundle can be pulled whole from a remote directory, composed from
+individual skills, or both.
 
-## Journey 1: Global Skills
+## Journey 1: A Whole Bundle From A Remote
 
-**Goal**: Make personal skills available to Pi and Claude Code.
+**Goal**: Point at one bundle in a git repo and get all of its skills, with an
+extra external skill layered on top.
 
 ```toml
 # ~/.config/uniskill/config.toml
 
 [bundles.generic]
 harnesses = ["pi", "claude-code"]
-
-[bundles.generic.skills.code-design]
 repo = "gh:lutyjj/agent-skills"
 ref = "main"
-path = "bundles/generic/skills/code-design"
+path = "bundles/generic"
 
+# caveman is not vendored in the repo — layer it on from upstream.
 [bundles.generic.skills.caveman]
 url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
 ```
 
-`uniskill sync` assembles the bundle into the cache, then links each skill into
-`$HOME/.agents/skills/{name}` and `$HOME/.claude/skills/{name}`.
+`uniskill sync` clones the repo, copies every skill under `bundles/generic/skills/`
+into the cache, adds `caveman`, then links each into `$HOME/.agents/skills/{name}`
+and `$HOME/.claude/skills/{name}`. Adding a skill to the bundle upstream needs no
+config change — the next sync picks it up.
 
 ## Journey 2: Custom Global Harness
 

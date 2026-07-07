@@ -4,60 +4,127 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+/// A bundle routes a set of skills into one or more harnesses.
+///
+/// Skills come from two composable layers:
+/// - a whole-bundle `source` (a local or git directory that contains a
+///   `skills/` folder), pulled as a unit — point at a bundle and be done;
+/// - explicit per-skill entries under `[bundles.<name>.skills.<skill>]`, which
+///   add to, or override by name, whatever the bundle source provided.
 #[derive(Debug, Deserialize)]
 pub struct Bundle {
     /// Which harnesses to wire this bundle into.
     pub harnesses: Vec<String>,
 
-    /// Skill definitions keyed by installed skill name.
+    /// Optional whole-bundle source. `url` is not valid here — a url is a single
+    /// file, not a bundle; use per-skill `url` entries instead.
+    #[serde(flatten)]
+    pub source: SourceSpec,
+
+    /// Explicit skill sources keyed by installed skill name.
     #[serde(default)]
-    pub skills: HashMap<String, SkillEntry>,
+    pub skills: HashMap<String, SourceSpec>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct SkillEntry {
-    /// HTTP(S) URL to fetch a single SKILL.md file.
-    #[serde(default)]
-    pub url: Option<String>,
-
-    /// Local skill directory.
+/// Raw source fields as written in TOML. Shared by bundles and skills: the same
+/// `source` / `repo` / `ref` / `path` / `url` vocabulary resolves the same way
+/// whether it points at a whole bundle or a single skill.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SourceSpec {
+    /// Local directory.
     #[serde(default)]
     pub source: Option<String>,
 
-    /// Git repository containing this skill directory.
+    /// Git repository.
     #[serde(default)]
     pub repo: Option<String>,
 
-    /// Branch, tag, or commit to check out for this skill's repository.
+    /// Branch, tag, or commit to check out for `repo`.
     #[serde(default, rename = "ref")]
     pub git_ref: Option<String>,
 
-    /// Skill directory path, relative to the inherited or explicit repo/source.
+    /// Path within `repo`, relative to its root. Defaults to the repo root.
     #[serde(default)]
     pub path: Option<String>,
+
+    /// HTTP(S) URL to a single `SKILL.md` (skills only).
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
-impl SkillEntry {
-    pub fn source_kind(&self) -> SkillSourceKind {
-        match (
-            self.url.is_some(),
-            self.source.is_some(),
-            self.repo.is_some(),
-        ) {
-            (true, false, false) => SkillSourceKind::Url,
-            (false, true, false) => SkillSourceKind::Local,
-            (false, false, true) => SkillSourceKind::Git,
-            _ => SkillSourceKind::Invalid,
+/// A resolved source: exactly one place content is fetched from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// Local directory.
+    Local(String),
+    /// Git repository, optionally narrowed to `path` at `git_ref`.
+    Git {
+        repo: String,
+        git_ref: Option<String>,
+        path: Option<String>,
+    },
+    /// A single `SKILL.md` fetched over HTTP(S).
+    Url(String),
+}
+
+/// Why a [`SourceSpec`] could not be resolved to a single [`Source`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceError {
+    /// More than one of `source` / `repo` / `url` was set.
+    Conflict,
+    /// `ref` or `path` was set with no `repo` to apply it to.
+    Dangling,
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceError::Conflict => f.write_str(
+                "declares more than one source; set exactly one of `source`, `repo`, or `url`",
+            ),
+            SourceError::Dangling => {
+                f.write_str("sets `ref`/`path` with no `repo` source to apply them to")
+            }
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkillSourceKind {
-    Url,
-    Local,
-    Git,
-    Invalid,
+impl std::error::Error for SourceError {}
+
+impl SourceSpec {
+    /// True when no source field is set at all.
+    pub fn is_empty(&self) -> bool {
+        self.source.is_none()
+            && self.repo.is_none()
+            && self.url.is_none()
+            && self.git_ref.is_none()
+            && self.path.is_none()
+    }
+
+    /// Classify into exactly one [`Source`], or `None` when nothing is declared.
+    pub fn resolve(&self) -> std::result::Result<Option<Source>, SourceError> {
+        match (
+            self.source.as_deref(),
+            self.repo.as_deref(),
+            self.url.as_deref(),
+        ) {
+            (None, None, None) => {
+                if self.git_ref.is_some() || self.path.is_some() {
+                    Err(SourceError::Dangling)
+                } else {
+                    Ok(None)
+                }
+            }
+            (Some(path), None, None) => Ok(Some(Source::Local(path.to_string()))),
+            (None, Some(repo), None) => Ok(Some(Source::Git {
+                repo: repo.to_string(),
+                git_ref: self.git_ref.clone(),
+                path: self.path.clone(),
+            })),
+            (None, None, Some(url)) => Ok(Some(Source::Url(url.to_string()))),
+            _ => Err(SourceError::Conflict),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,7 +576,14 @@ path = "bundles/generic/skills/code-design"
             Some("bundles/generic/skills/code-design")
         );
         assert_eq!(bundle.harnesses, vec!["pi", "claude-code"]);
-        assert_eq!(skill.source_kind(), SkillSourceKind::Git);
+        assert_eq!(
+            skill.resolve().unwrap(),
+            Some(Source::Git {
+                repo: "gh:lutyjj/agent-skills".to_string(),
+                git_ref: Some("main".to_string()),
+                path: Some("bundles/generic/skills/code-design".to_string()),
+            })
+        );
     }
 
     #[test]
@@ -529,12 +603,91 @@ source = "/local/path/skills/local-skill"
         let bundle = config.bundles.get("mixed-bundle").unwrap();
         assert_eq!(bundle.skills.len(), 2);
         assert_eq!(
-            bundle.skills["remote-skill"].source_kind(),
-            SkillSourceKind::Url
+            bundle.skills["remote-skill"].resolve().unwrap(),
+            Some(Source::Url("https://example.com/remote.md".to_string()))
         );
         assert_eq!(
-            bundle.skills["local-skill"].source_kind(),
-            SkillSourceKind::Local
+            bundle.skills["local-skill"].resolve().unwrap(),
+            Some(Source::Local("/local/path/skills/local-skill".to_string()))
         );
+    }
+
+    #[test]
+    fn test_parse_whole_bundle_git_source() {
+        // A bundle can point at a whole remote bundle directory as a unit,
+        // with no explicit skill entries at all.
+        let content = r#"
+[bundles.generic]
+harnesses = ["pi", "claude-code"]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic"
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        let bundle = config.bundles.get("generic").unwrap();
+        assert!(bundle.skills.is_empty());
+        assert!(!bundle.source.is_empty());
+        assert_eq!(
+            bundle.source.resolve().unwrap(),
+            Some(Source::Git {
+                repo: "gh:lutyjj/agent-skills".to_string(),
+                git_ref: Some("main".to_string()),
+                path: Some("bundles/generic".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_bundle_source_and_skills_compose() {
+        // A whole-bundle source and explicit skills coexist: pull the bundle,
+        // then layer an extra url skill on top.
+        let content = r#"
+[bundles.generic]
+harnesses = ["pi"]
+repo = "gh:lutyjj/agent-skills"
+path = "bundles/generic"
+
+[bundles.generic.skills.caveman]
+url = "https://example.com/caveman.md"
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        let bundle = config.bundles.get("generic").unwrap();
+        assert!(matches!(
+            bundle.source.resolve().unwrap(),
+            Some(Source::Git { .. })
+        ));
+        assert_eq!(
+            bundle.skills["caveman"].resolve().unwrap(),
+            Some(Source::Url("https://example.com/caveman.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_source_spec_empty_resolves_to_none() {
+        let spec = SourceSpec::default();
+        assert!(spec.is_empty());
+        assert_eq!(spec.resolve().unwrap(), None);
+    }
+
+    #[test]
+    fn test_source_spec_conflict_is_rejected() {
+        let spec = SourceSpec {
+            source: Some("/tmp/skill".to_string()),
+            url: Some("https://example.com/skill.md".to_string()),
+            ..SourceSpec::default()
+        };
+        assert_eq!(spec.resolve(), Err(SourceError::Conflict));
+    }
+
+    #[test]
+    fn test_source_spec_dangling_ref_is_rejected() {
+        let spec = SourceSpec {
+            path: Some("bundles/generic".to_string()),
+            ..SourceSpec::default()
+        };
+        assert!(!spec.is_empty());
+        assert_eq!(spec.resolve(), Err(SourceError::Dangling));
     }
 }

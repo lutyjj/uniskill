@@ -1,8 +1,8 @@
 # uniskill
 
 Wire named skill groups into multiple agent harnesses. A bundle is a routing
-layer: it names a set of skills and says which harnesses receive them. Each
-skill declares its own source.
+layer: it names a set of skills and says which harnesses receive them. A bundle
+can be pulled whole from a remote, composed from individual skills, or both.
 
 ## What It Does
 
@@ -11,17 +11,24 @@ and creates symlinks at every target harness path. A single bundle can install t
 the Pi harness (`~/.agents/skills/`), Claude Code (`~/.claude/skills/`), or any
 custom harness you define.
 
-Skill sources can be mixed inside the same bundle:
+A bundle draws skills from two composable layers:
 
-- `source`: local skill directory containing `SKILL.md`
-- `url`: HTTP(S) URL for a single `SKILL.md`
-- `repo` + `path`: skill directory inside a git repository
+- **Whole-bundle source** — put `source` or `repo` + `path` on the bundle to
+  point at a bundle directory (one holding a `skills/` folder) and pull every
+  skill it declares as a unit. Add a skill upstream and the next sync picks it up.
+- **Explicit skills** — `[bundles.<name>.skills.<skill>]` entries that add to, or
+  override by name, whatever the bundle source provided.
+
+The same source vocabulary applies to a whole bundle or a single skill:
+
+- `source`: local directory
+- `repo` (+ optional `ref`, `path`): git repository, optionally narrowed
+- `url`: HTTP(S) URL for a single `SKILL.md` (skills only)
 
 ## What It Does Not Do
 
-uniskill does not publish skills, infer whole repositories automatically, handle
-semver dependency solving, or modify harness configuration beyond creating and
-updating symlinks.
+uniskill does not publish skills, handle semver dependency solving, or modify
+harness configuration beyond creating and updating symlinks.
 
 ## Quick Start
 

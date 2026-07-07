@@ -1,21 +1,30 @@
 # uniskill configuration
 # Place this at ~/.config/uniskill/config.toml or pass --config
 
+# Whole-bundle source: point at a bundle directory in a git repo (containing
+# meta.toml + skills/) and pull every skill it declares as a unit.
 [bundles.generic]
 harnesses = ["pi", "claude-code"]
+repo = "gh:lutyjj/agent-skills"
+ref = "main"
+path = "bundles/generic"
 
-# Skill from a private git repository. GitHub shorthands use SSH.
-[bundles.generic.skills.code-design]
+# Explicit skills layer on top of the bundle source: add skills it does not
+# vendor, or override one by name. Here caveman comes from a raw SKILL.md URL.
+[bundles.generic.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
+
+# A bundle can also be composed purely from explicit skills, each with its own
+# source: a local directory, a git repo path, or a URL.
+[bundles.handpicked]
+harnesses = ["pi"]
+
+[bundles.handpicked.skills.code-design]
 repo = "gh:lutyjj/agent-skills"
 ref = "main"
 path = "bundles/generic/skills/code-design"
 
-# Skill from a raw SKILL.md URL.
-[bundles.generic.skills.caveman]
-url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
-
-# Skill from a local directory.
-[bundles.generic.skills.local-example]
+[bundles.handpicked.skills.local-example]
 source = "$HOME/.dotfiles/skills/local-example"
 
 [harnesses.my-custom-harness]

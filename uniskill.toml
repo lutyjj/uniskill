@@ -1,15 +1,15 @@
 # Project-level config — everything installs into .agents/skills/ here.
-# Both local and virtual bundles wired into the same project harness.
+# A whole local bundle and an explicit URL skill wired into one project harness.
 
 [harnesses.agents]
 pattern = ".agents/skills/{name}"
 
-# Local bundle: our own development skill, installed project-locally
+# Whole-bundle source: pull every skill under ./uniskill-bundle/skills/
 [bundles.uniskill-dev-skill]
 source = "./uniskill-bundle"
 harnesses = ["agents"]
 
-# Virtual bundle: fetch caveman skill from a remote URL
+# Explicit skill: fetch caveman from a remote URL
 [bundles.remote-caveman]
 harnesses = ["agents"]
 

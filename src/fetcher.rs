@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -6,15 +5,20 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::config::{self, SkillEntry, SkillSourceKind};
+use crate::config::{self, Bundle, Source, SourceSpec};
 
-pub fn assemble_explicit_bundle(
+/// Assemble a bundle into `cache_dir/bundles/<name>/skills/`.
+///
+/// Two composable layers land in the same `skills/` directory:
+/// 1. the whole-bundle `source`, whose own `skills/*` are copied in as a unit;
+/// 2. explicit per-skill entries, which add to or override those by name.
+pub fn assemble_bundle(
     bundle_name: &str,
-    skills: &HashMap<String, SkillEntry>,
-    base_dir: &Path,
+    bundle: &Bundle,
+    cache_dir: &Path,
     source_base_dir: &Path,
 ) -> Result<PathBuf> {
-    let bundle_root = base_dir.join("bundles").join(bundle_name);
+    let bundle_root = cache_dir.join("bundles").join(bundle_name);
     let skills_dir = bundle_root.join("skills");
     if bundle_root.exists() {
         fs::remove_dir_all(&bundle_root).with_context(|| {
@@ -24,47 +28,143 @@ pub fn assemble_explicit_bundle(
     fs::create_dir_all(&skills_dir)
         .with_context(|| format!("failed to create bundle cache at {}", skills_dir.display()))?;
 
-    for (skill_name, entry) in skills {
-        assemble_skill(skill_name, entry, &skills_dir, base_dir, source_base_dir)?;
+    if let Some(source) = bundle
+        .source
+        .resolve()
+        .map_err(|e| anyhow::anyhow!("bundle '{bundle_name}' {e}"))?
+    {
+        let bundle_dir = materialize_bundle_dir(bundle_name, &source, cache_dir, source_base_dir)?;
+        copy_bundle_skills(bundle_name, &bundle_dir, &skills_dir)?;
+    }
+
+    for (skill_name, spec) in &bundle.skills {
+        let source = resolve_skill_source(skill_name, spec)?;
+        let dest = skills_dir.join(skill_name);
+        materialize_skill(skill_name, &source, &dest, cache_dir, source_base_dir)?;
     }
 
     Ok(bundle_root)
 }
 
-fn assemble_skill(
-    skill_name: &str,
-    entry: &SkillEntry,
-    skills_dir: &Path,
+/// Resolve a skill's source spec, requiring exactly one source to be declared.
+fn resolve_skill_source(skill_name: &str, spec: &SourceSpec) -> Result<Source> {
+    spec.resolve()
+        .map_err(|e| anyhow::anyhow!("skill '{skill_name}' {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("skill '{skill_name}' declares no source"))
+}
+
+/// Resolve a whole-bundle source to a local bundle directory (containing
+/// `skills/`). A `url` source is rejected — a url is a single file, not a bundle.
+fn materialize_bundle_dir(
+    bundle_name: &str,
+    source: &Source,
     cache_dir: &Path,
-    source_base_dir: &Path,
+    base_dir: &Path,
+) -> Result<PathBuf> {
+    match source {
+        Source::Local(path) => Ok(config::resolve_source_from(path, base_dir)),
+        Source::Git {
+            repo,
+            git_ref,
+            path,
+        } => resolve_git_dir(
+            repo,
+            git_ref.as_deref(),
+            path.as_deref(),
+            cache_dir,
+            base_dir,
+        ),
+        Source::Url(_) => Err(anyhow::anyhow!(
+            "bundle '{bundle_name}' cannot use a `url` source — a url is a single file, \
+             not a bundle; declare it as a per-skill entry under \
+             [bundles.{bundle_name}.skills.<name>] instead"
+        )),
+    }
+}
+
+/// Copy every skill directory (one containing `SKILL.md`) from a bundle
+/// source's `skills/` folder into the assembled bundle.
+fn copy_bundle_skills(bundle_name: &str, bundle_dir: &Path, dest_skills_dir: &Path) -> Result<()> {
+    let src_skills = bundle_dir.join("skills");
+    if !src_skills.is_dir() {
+        return Err(anyhow::anyhow!(
+            "bundle '{bundle_name}' source has no skills/ directory at {}",
+            bundle_dir.display()
+        ));
+    }
+
+    let mut copied = 0;
+    for entry in fs::read_dir(&src_skills)
+        .with_context(|| format!("failed to read {}", src_skills.display()))?
+    {
+        let entry = entry?;
+        let skill_path = entry.path();
+        // Only directories that actually contain a SKILL.md are skills.
+        if !skill_path.is_dir() || !skill_path.join("SKILL.md").is_file() {
+            continue;
+        }
+        copy_dir_all(&skill_path, &dest_skills_dir.join(entry.file_name()))?;
+        copied += 1;
+    }
+
+    if copied == 0 {
+        return Err(anyhow::anyhow!(
+            "bundle '{bundle_name}' source has no skills under {}",
+            src_skills.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Materialize a single skill into `dest` (a directory containing `SKILL.md`).
+fn materialize_skill(
+    skill_name: &str,
+    source: &Source,
+    dest: &Path,
+    cache_dir: &Path,
+    base_dir: &Path,
 ) -> Result<()> {
-    let dest = skills_dir.join(skill_name);
-    match entry.source_kind() {
-        SkillSourceKind::Url => {
-            fs::create_dir_all(&dest)
+    match source {
+        Source::Local(path) => {
+            let source = config::resolve_source_from(path, base_dir);
+            copy_skill_dir(skill_name, &source, dest)
+        }
+        Source::Git {
+            repo,
+            git_ref,
+            path,
+        } => {
+            let source = resolve_git_dir(
+                repo,
+                git_ref.as_deref(),
+                path.as_deref(),
+                cache_dir,
+                base_dir,
+            )?;
+            copy_skill_dir(skill_name, &source, dest)
+        }
+        Source::Url(url) => {
+            fs::create_dir_all(dest)
                 .with_context(|| format!("failed to create skill cache dir for '{skill_name}'"))?;
-            let url = entry.url.as_deref().expect("url source checked");
             download_skill(url, &dest.join("SKILL.md"))
         }
-        SkillSourceKind::Local => {
-            let source = entry.source.as_deref().expect("local source checked");
-            let source = config::resolve_source_from(source, source_base_dir);
-            copy_skill_dir(skill_name, &source, &dest)
-        }
-        SkillSourceKind::Git => {
-            let repo = entry.repo.as_deref().expect("git source checked");
-            let skill_path = entry.path.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("git skill '{skill_name}' requires a path inside the repository")
-            })?;
-            let repo = config::resolve_repo_from(repo, source_base_dir);
-            let repo_root = fetch_git_repo(&repo, entry.git_ref.as_deref(), cache_dir)?;
-            let source = resolve_repo_path(&repo_root, skill_path)?;
-            copy_skill_dir(skill_name, &source, &dest)
-        }
-        SkillSourceKind::Invalid => Err(anyhow::anyhow!(
-            "skill '{}' must declare exactly one source: url, source, or repo",
-            skill_name
-        )),
+    }
+}
+
+/// Fetch a git repo into the cache and resolve `path` within it (repo root when
+/// `path` is absent). Shared by whole-bundle and per-skill git sources.
+fn resolve_git_dir(
+    repo: &str,
+    git_ref: Option<&str>,
+    path: Option<&str>,
+    cache_dir: &Path,
+    base_dir: &Path,
+) -> Result<PathBuf> {
+    let repo = config::resolve_repo_from(repo, base_dir);
+    let repo_root = fetch_git_repo(&repo, git_ref, cache_dir)?;
+    match path {
+        Some(path) => resolve_repo_path(&repo_root, path),
+        None => Ok(repo_root),
     }
 }
 
@@ -293,10 +393,36 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
+    /// Build a bundle from an optional whole-bundle source plus explicit skills.
+    fn bundle_with(source: SourceSpec, skills: &[(&str, SourceSpec)]) -> Bundle {
+        Bundle {
+            harnesses: Vec::new(),
+            source,
+            skills: skills
+                .iter()
+                .map(|(name, spec)| ((*name).to_string(), spec.clone()))
+                .collect(),
+        }
+    }
+
+    /// Write a minimal skill directory (a `SKILL.md`) at `dir`.
+    fn write_skill_dir(dir: &Path, name: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+    }
+
+    /// Initialize `dir` as a git repo with a single commit of its contents.
+    fn init_git_repo(dir: &Path) {
+        run_command(Command::new("git").arg("init").arg(dir)).unwrap();
+        run_git(dir, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(dir, &["config", "user.name", "Test User"]).unwrap();
+        run_git(dir, &["add", "."]).unwrap();
+        run_git(dir, &["commit", "--quiet", "-m", "init"]).unwrap();
+    }
 
     #[test]
-    fn test_assemble_explicit_bundle_copies_local_skill() {
+    fn test_assemble_bundle_copies_local_skill() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("cache");
         let source = tmp.path().join("source").join("code-design");
@@ -304,16 +430,18 @@ mod tests {
         fs::write(source.join("SKILL.md"), "---\nname: code-design\n---\n").unwrap();
         fs::write(source.join("agents").join("openai.yaml"), "version: 1\n").unwrap();
 
-        let mut skills = HashMap::new();
-        skills.insert(
-            "code-design".to_string(),
-            SkillEntry {
-                source: Some(source.to_string_lossy().to_string()),
-                ..SkillEntry::default()
-            },
+        let bundle = bundle_with(
+            SourceSpec::default(),
+            &[(
+                "code-design",
+                SourceSpec {
+                    source: Some(source.to_string_lossy().to_string()),
+                    ..SourceSpec::default()
+                },
+            )],
         );
 
-        let bundle_root = assemble_explicit_bundle("generic", &skills, &base, tmp.path()).unwrap();
+        let bundle_root = assemble_bundle("generic", &bundle, &base, tmp.path()).unwrap();
 
         assert_eq!(bundle_root, base.join("bundles").join("generic"));
         assert!(bundle_root
@@ -330,24 +458,25 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_explicit_bundle_downloads_url_skill() {
+    fn test_assemble_bundle_downloads_url_skill() {
         let Some(url) = serve_once("# Remote Skill\n\nTest content") else {
             return;
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut skills = HashMap::new();
-        skills.insert(
-            "remote-skill".to_string(),
-            SkillEntry {
-                url: Some(url),
-                ..SkillEntry::default()
-            },
+        let bundle = bundle_with(
+            SourceSpec::default(),
+            &[(
+                "remote-skill",
+                SourceSpec {
+                    url: Some(url),
+                    ..SourceSpec::default()
+                },
+            )],
         );
 
         let bundle_root =
-            assemble_explicit_bundle("remote", &skills, &tmp.path().join("cache"), tmp.path())
-                .unwrap();
+            assemble_bundle("remote", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
 
         let content = fs::read_to_string(
             bundle_root
@@ -357,6 +486,177 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content, "# Remote Skill\n\nTest content");
+    }
+
+    #[test]
+    fn test_assemble_bundle_pulls_whole_local_bundle_source() {
+        // Point a bundle at a local bundle directory; every skill under its
+        // skills/ folder is pulled as a unit, with no explicit entries.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp
+            .path()
+            .join("agent-skills")
+            .join("bundles")
+            .join("generic");
+        write_skill_dir(&src.join("skills").join("code-design"), "code-design");
+        write_skill_dir(
+            &src.join("skills").join("technical-writing"),
+            "technical-writing",
+        );
+        // A stray file under skills/ must be ignored (not a skill directory).
+        fs::write(src.join("skills").join("README.md"), "ignore me").unwrap();
+
+        let bundle = bundle_with(
+            SourceSpec {
+                source: Some(src.to_string_lossy().to_string()),
+                ..SourceSpec::default()
+            },
+            &[],
+        );
+
+        let bundle_root =
+            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
+
+        let skills = bundle_root.join("skills");
+        assert!(skills.join("code-design").join("SKILL.md").exists());
+        assert!(skills.join("technical-writing").join("SKILL.md").exists());
+        assert!(!skills.join("README.md").exists());
+    }
+
+    #[test]
+    fn test_assemble_bundle_pulls_whole_git_bundle_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("agent-skills");
+        write_skill_dir(
+            &repo
+                .join("bundles")
+                .join("generic")
+                .join("skills")
+                .join("code-design"),
+            "code-design",
+        );
+        write_skill_dir(
+            &repo
+                .join("bundles")
+                .join("generic")
+                .join("skills")
+                .join("context7-mcp"),
+            "context7-mcp",
+        );
+        init_git_repo(&repo);
+
+        let bundle = bundle_with(
+            SourceSpec {
+                repo: Some(repo.to_string_lossy().to_string()),
+                path: Some("bundles/generic".to_string()),
+                ..SourceSpec::default()
+            },
+            &[],
+        );
+
+        let bundle_root =
+            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
+
+        assert!(bundle_root
+            .join("skills")
+            .join("code-design")
+            .join("SKILL.md")
+            .exists());
+        assert!(bundle_root
+            .join("skills")
+            .join("context7-mcp")
+            .join("SKILL.md")
+            .exists());
+    }
+
+    #[test]
+    fn test_assemble_bundle_source_plus_explicit_skill_overrides() {
+        // Layer explicit skills over a whole-bundle source: an extra skill is
+        // added, and a same-named skill overrides the one from the source.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("bundle");
+        write_skill_dir(&src.join("skills").join("shared"), "from-source");
+
+        let override_dir = tmp.path().join("override").join("shared");
+        fs::create_dir_all(&override_dir).unwrap();
+        fs::write(override_dir.join("SKILL.md"), "OVERRIDDEN").unwrap();
+
+        let extra_dir = tmp.path().join("extra").join("caveman");
+        write_skill_dir(&extra_dir, "caveman");
+
+        let bundle = bundle_with(
+            SourceSpec {
+                source: Some(src.to_string_lossy().to_string()),
+                ..SourceSpec::default()
+            },
+            &[
+                (
+                    "shared",
+                    SourceSpec {
+                        source: Some(override_dir.to_string_lossy().to_string()),
+                        ..SourceSpec::default()
+                    },
+                ),
+                (
+                    "caveman",
+                    SourceSpec {
+                        source: Some(extra_dir.to_string_lossy().to_string()),
+                        ..SourceSpec::default()
+                    },
+                ),
+            ],
+        );
+
+        let bundle_root =
+            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
+
+        let skills = bundle_root.join("skills");
+        assert!(skills.join("caveman").join("SKILL.md").exists());
+        let shared = fs::read_to_string(skills.join("shared").join("SKILL.md")).unwrap();
+        assert_eq!(shared, "OVERRIDDEN");
+    }
+
+    #[test]
+    fn test_assemble_bundle_rejects_url_bundle_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = bundle_with(
+            SourceSpec {
+                url: Some("https://example.com/SKILL.md".to_string()),
+                ..SourceSpec::default()
+            },
+            &[],
+        );
+
+        let result = assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_assemble_bundle_git_skill_defaults_to_repo_root() {
+        // A git skill without `path` resolves to the repo root as the skill dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("single-skill-repo");
+        write_skill_dir(&repo, "solo");
+        init_git_repo(&repo);
+
+        let bundle = bundle_with(
+            SourceSpec::default(),
+            &[(
+                "solo",
+                SourceSpec {
+                    repo: Some(repo.to_string_lossy().to_string()),
+                    ..SourceSpec::default()
+                },
+            )],
+        );
+
+        let bundle_root =
+            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
+        assert!(bundle_root
+            .join("skills")
+            .join("solo")
+            .join("SKILL.md")
+            .exists());
     }
 
     #[test]
@@ -408,47 +708,33 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_explicit_bundle_uses_git_skill_path() {
+    fn test_assemble_bundle_uses_git_skill_path() {
         let tmp = tempfile::tempdir().unwrap();
         let source_repo = tmp.path().join("source");
-        fs::create_dir_all(
-            source_repo
+        write_skill_dir(
+            &source_repo
                 .join("bundles")
                 .join("generic")
                 .join("skills")
                 .join("code-design"),
-        )
-        .unwrap();
-        fs::write(
-            source_repo
-                .join("bundles")
-                .join("generic")
-                .join("skills")
-                .join("code-design")
-                .join("SKILL.md"),
-            "---\nname: code-design\n---\n",
-        )
-        .unwrap();
+            "code-design",
+        );
+        init_git_repo(&source_repo);
 
-        run_command(Command::new("git").arg("init").arg(&source_repo)).unwrap();
-        run_git(&source_repo, &["config", "user.email", "test@example.com"]).unwrap();
-        run_git(&source_repo, &["config", "user.name", "Test User"]).unwrap();
-        run_git(&source_repo, &["add", "."]).unwrap();
-        run_git(&source_repo, &["commit", "--quiet", "-m", "init"]).unwrap();
-
-        let mut skills = HashMap::new();
-        skills.insert(
-            "code-design".to_string(),
-            SkillEntry {
-                repo: Some(source_repo.to_string_lossy().to_string()),
-                path: Some("bundles/generic/skills/code-design".to_string()),
-                ..SkillEntry::default()
-            },
+        let bundle = bundle_with(
+            SourceSpec::default(),
+            &[(
+                "code-design",
+                SourceSpec {
+                    repo: Some(source_repo.to_string_lossy().to_string()),
+                    path: Some("bundles/generic/skills/code-design".to_string()),
+                    ..SourceSpec::default()
+                },
+            )],
         );
 
         let bundle_root =
-            assemble_explicit_bundle("generic", &skills, &tmp.path().join("cache"), tmp.path())
-                .unwrap();
+            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
 
         assert!(bundle_root
             .join("skills")
@@ -458,39 +744,22 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_explicit_bundle_rejects_invalid_skill_sources() {
+    fn test_assemble_bundle_rejects_invalid_skill_sources() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut skills = HashMap::new();
-        skills.insert(
-            "bad".to_string(),
-            SkillEntry {
-                url: Some("https://example.com/skill.md".to_string()),
-                source: Some("/tmp/skill".to_string()),
-                ..SkillEntry::default()
-            },
+        let bundle = bundle_with(
+            SourceSpec::default(),
+            &[(
+                "bad",
+                SourceSpec {
+                    url: Some("https://example.com/skill.md".to_string()),
+                    source: Some("/tmp/skill".to_string()),
+                    ..SourceSpec::default()
+                },
+            )],
         );
 
-        let result =
-            assemble_explicit_bundle("generic", &skills, &tmp.path().join("cache"), tmp.path());
+        let result = assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_assemble_explicit_bundle_rejects_git_skill_without_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut skills = HashMap::new();
-        skills.insert(
-            "bad".to_string(),
-            SkillEntry {
-                repo: Some("gh:lutyjj/agent-skills".to_string()),
-                ..SkillEntry::default()
-            },
-        );
-
-        let result =
-            assemble_explicit_bundle("generic", &skills, &tmp.path().join("cache"), tmp.path());
-        assert!(result.is_err());
-        assert!(!tmp.path().join("cache").join("repos").exists());
     }
 
     fn serve_once(body: &'static str) -> Option<String> {

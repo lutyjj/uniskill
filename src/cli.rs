@@ -123,18 +123,15 @@ fn sync_with_registry(
     let mut total_conflict = 0;
 
     for (bundle_name, bundle) in bundles {
-        let source = if bundle.skills.is_empty() {
-            println!("  ! bundle '{}' has no skills — skipping", bundle_name,);
+        if bundle.source.is_empty() && bundle.skills.is_empty() {
+            println!(
+                "  ! bundle '{}' has no source or skills — skipping",
+                bundle_name,
+            );
             total_conflict += 1;
             continue;
-        } else {
-            fetcher::assemble_explicit_bundle(
-                bundle_name,
-                &bundle.skills,
-                cache_dir,
-                source_base_dir,
-            )?
-        };
+        }
+        let source = fetcher::assemble_bundle(bundle_name, bundle, cache_dir, source_base_dir)?;
 
         // Validate that all declared harnesses exist in the registry.
         for harness_name in &bundle.harnesses {
