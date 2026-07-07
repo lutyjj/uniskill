@@ -4,6 +4,7 @@ mod error;
 mod fetcher;
 mod harnesses;
 mod linker;
+mod state;
 
 fn main() {
     match cli::run() {

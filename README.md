@@ -31,6 +31,11 @@ source and `git pull` is live — re-sync only to add or remove a skill. Set
 `link = false` on a bundle to copy instead. Remote `repo` and `url` sources are
 always copied.
 
+`sync` is deterministic and self-healing: bundles are processed in sorted order,
+a bundle that fails to build is reported and skipped instead of aborting the run,
+and links from a previous sync that are no longer in the config are pruned. Only
+uniskill's own symlinks are ever removed — hand-placed files are left alone.
+
 ## What It Does Not Do
 
 uniskill does not publish skills, handle semver dependency solving, or modify

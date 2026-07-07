@@ -171,17 +171,39 @@ left unchanged.
 
 1. Load built-in harnesses.
 2. Load config and merge custom harnesses.
-3. For each bundle, clear and recreate its assembled cache directory.
-4. If the bundle has a whole-bundle source, place every skill under its `skills/`
+3. Load the previous run's link manifest.
+4. For each bundle **in sorted order**, clear and recreate its assembled cache
+   directory. A bundle that fails to build is reported and skipped — it does not
+   abort the run — and the process exits non-zero at the end.
+5. If the bundle has a whole-bundle source, place every skill under its `skills/`
    folder into the bundle cache — symlinked for a local source when `link`,
    copied otherwise.
-5. For each explicit skill entry, place its source into the bundle cache
+6. For each explicit skill entry, place its source into the bundle cache
    (clearing any same-named skill first), adding to or overriding the
    whole-bundle skills by name.
-6. For each bundle-harness pair, create or update symlinks to cached skills.
+7. For each bundle-harness pair, create or update symlinks to cached skills,
+   recording each in the new manifest.
+8. Prune: remove any link from the previous manifest that was not installed this
+   run, then write the new manifest.
 
 For a linked local source the harness symlink resolves through the cache entry
 to the working tree, so the cache is an index of live links rather than copies.
+
+## State and Pruning
+
+uniskill records every link it installs in `state.toml` next to the assembled
+bundles. On the next sync it removes links that are no longer declared — a skill
+dropped from a bundle, or a whole bundle removed from the config — so config is
+the source of truth for what stays installed.
+
+Pruning is deliberately conservative. A link is removed only when it is still a
+symlink pointing into uniskill's own cache, so hand-placed directories and
+foreign symlinks in a harness are never touched. A link whose bundle failed to
+build this run is kept, not pruned: a build error is a failure, not a removal.
+
+Because output order and the installed set are both derived from sorted config
+rather than filesystem iteration, repeated syncs of an unchanged config produce
+identical output.
 
 Global cache lives under `$XDG_CACHE_HOME/uniskill/` when available, otherwise
 `./.uniskill-cache`. Project config uses `.uniskill-cache/` next to the project
