@@ -40,6 +40,19 @@ A bundle needs at least one layer. The bundle key is stable identity for logging
 and cache paths, not a source path, so a single bundle can mix local, URL, and
 git-backed skills while retaining one destination policy.
 
+### Link vs Copy
+
+`link` (default `true`) controls how a **local** `source` reaches the assembled
+bundle:
+
+- `link = true`: the assembled skill is a symlink at the source working tree, so
+  edits made through a harness land in the source and `git pull` is live — a
+  re-sync is only needed to add or remove a skill.
+- `link = false`: the local source is copied, snapshotting it.
+
+Remote `repo` and `url` sources are always copied regardless of `link`: the git
+cache and a downloaded file are not working trees to edit against.
+
 ### Source
 
 The same source vocabulary describes where a whole bundle or a single skill
@@ -159,11 +172,16 @@ left unchanged.
 1. Load built-in harnesses.
 2. Load config and merge custom harnesses.
 3. For each bundle, clear and recreate its assembled cache directory.
-4. If the bundle has a whole-bundle source, copy every skill under its `skills/`
-   folder into the bundle cache.
-5. For each explicit skill entry, fetch or copy its source into the bundle
-   cache, adding to or overriding the whole-bundle skills by name.
+4. If the bundle has a whole-bundle source, place every skill under its `skills/`
+   folder into the bundle cache — symlinked for a local source when `link`,
+   copied otherwise.
+5. For each explicit skill entry, place its source into the bundle cache
+   (clearing any same-named skill first), adding to or overriding the
+   whole-bundle skills by name.
 6. For each bundle-harness pair, create or update symlinks to cached skills.
+
+For a linked local source the harness symlink resolves through the cache entry
+to the working tree, so the cache is an index of live links rather than copies.
 
 Global cache lives under `$XDG_CACHE_HOME/uniskill/` when available, otherwise
 `./.uniskill-cache`. Project config uses `.uniskill-cache/` next to the project

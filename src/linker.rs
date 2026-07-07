@@ -114,7 +114,7 @@ pub fn ensure_skill_symlink(source: &Path, target_dir: &Path) -> SyncResult {
 }
 
 /// Create a symlink. Returns error if it fails.
-fn create_symlink(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn create_symlink(source: &Path, target: &Path) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
         // Windows needs admin or developer mode for symlinks

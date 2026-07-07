@@ -24,6 +24,19 @@ pub struct Bundle {
     /// Explicit skill sources keyed by installed skill name.
     #[serde(default)]
     pub skills: HashMap<String, SourceSpec>,
+
+    /// Live-link local sources instead of copying them (default). A local
+    /// `source` is a working tree you own, so the assembled skill points
+    /// straight at it: edits through a harness land in the source and `git pull`
+    /// is live with no re-sync. Set `false` to snapshot local sources by copy.
+    /// Remote `repo` and `url` sources are always copied — they have no working
+    /// tree to link — regardless of this flag.
+    #[serde(default = "default_link")]
+    pub link: bool,
+}
+
+fn default_link() -> bool {
+    true
 }
 
 /// Raw source fields as written in TOML. Shared by bundles and skills: the same
@@ -662,6 +675,31 @@ url = "https://example.com/caveman.md"
             bundle.skills["caveman"].resolve().unwrap(),
             Some(Source::Url("https://example.com/caveman.md".to_string()))
         );
+    }
+
+    #[test]
+    fn test_bundle_link_defaults_true() {
+        let content = r#"
+[bundles.generic]
+harnesses = ["pi"]
+source = "../bundles/generic"
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        assert!(config.bundles.get("generic").unwrap().link);
+    }
+
+    #[test]
+    fn test_bundle_link_can_be_disabled() {
+        let content = r#"
+[bundles.generic]
+harnesses = ["pi"]
+source = "../bundles/generic"
+link = false
+"#;
+        let file = write_temp_toml(content);
+        let config = parse_config(file.path()).unwrap();
+        assert!(!config.bundles.get("generic").unwrap().link);
     }
 
     #[test]

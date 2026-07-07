@@ -28,6 +28,28 @@ into the cache, adds `caveman`, then links each into `$HOME/.agents/skills/{name
 and `$HOME/.claude/skills/{name}`. Adding a skill to the bundle upstream needs no
 config change — the next sync picks it up.
 
+## Journey 1b: Live-Editing From A Local Clone
+
+**Goal**: Clone the skills repo, run uniskill against the clone, and edit skills
+from any harness — pushing from the repo when they are ready.
+
+```toml
+# agent-skills/configs/global.toml (run: uniskill --config configs/global.toml sync)
+
+[bundles.generic]
+harnesses = ["pi", "claude-code"]
+source = "../bundles/generic"   # relative to this config; linked live by default
+
+[bundles.generic.skills.caveman]
+url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
+```
+
+Because a local `source` links straight to the working tree, editing
+`~/.agents/skills/code-design/SKILL.md` edits `agent-skills/bundles/generic/skills/code-design/SKILL.md`
+directly. `git pull` is live in every harness; you only re-run `sync` when a
+skill is added or removed. When changes are ready, commit and push from the repo.
+`caveman` stays a copied `url` skill — only local sources link.
+
 ## Journey 2: Custom Global Harness
 
 **Goal**: Add an experimental agent framework without changing the binary.

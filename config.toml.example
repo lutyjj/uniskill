@@ -14,6 +14,15 @@ path = "bundles/generic"
 [bundles.generic.skills.caveman]
 url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
 
+# Live workflow: point at a LOCAL clone and edit from any harness. A local
+# `source` is symlinked straight to its working tree (link = true, the default),
+# so edits through a harness land in the repo and `git pull` is live — re-sync
+# only when you add or remove a skill. Relative paths resolve against this file.
+[bundles.local-live]
+harnesses = ["pi", "claude-code"]
+source = "../bundles/generic"
+# link = false   # opt out: snapshot the local source by copy instead
+
 # A bundle can also be composed purely from explicit skills, each with its own
 # source: a local directory, a git repo path, or a URL.
 [bundles.handpicked]

@@ -25,6 +25,12 @@ The same source vocabulary applies to a whole bundle or a single skill:
 - `repo` (+ optional `ref`, `path`): git repository, optionally narrowed
 - `url`: HTTP(S) URL for a single `SKILL.md` (skills only)
 
+A local `source` is **linked live** by default (`link = true`): the harness
+symlinks straight to your working tree, so edits from any harness land in the
+source and `git pull` is live — re-sync only to add or remove a skill. Set
+`link = false` on a bundle to copy instead. Remote `repo` and `url` sources are
+always copied.
+
 ## What It Does Not Do
 
 uniskill does not publish skills, handle semver dependency solving, or modify

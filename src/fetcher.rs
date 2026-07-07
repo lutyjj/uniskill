@@ -10,8 +10,12 @@ use crate::config::{self, Bundle, Source, SourceSpec};
 /// Assemble a bundle into `cache_dir/bundles/<name>/skills/`.
 ///
 /// Two composable layers land in the same `skills/` directory:
-/// 1. the whole-bundle `source`, whose own `skills/*` are copied in as a unit;
+/// 1. the whole-bundle `source`, whose own `skills/*` are placed in as a unit;
 /// 2. explicit per-skill entries, which add to or override those by name.
+///
+/// A local `source` is placed by symlink when `bundle.link` (the default), so
+/// edits flow both ways between harness and working tree; remote `repo` and
+/// `url` sources are always copied — they have no working tree to link.
 pub fn assemble_bundle(
     bundle_name: &str,
     bundle: &Bundle,
@@ -33,17 +37,42 @@ pub fn assemble_bundle(
         .resolve()
         .map_err(|e| anyhow::anyhow!("bundle '{bundle_name}' {e}"))?
     {
+        // Only a local working tree can be linked live; remote sources copy.
+        let link = bundle.link && matches!(source, Source::Local(_));
         let bundle_dir = materialize_bundle_dir(bundle_name, &source, cache_dir, source_base_dir)?;
-        copy_bundle_skills(bundle_name, &bundle_dir, &skills_dir)?;
+        place_bundle_skills(bundle_name, &bundle_dir, &skills_dir, link)?;
     }
 
     for (skill_name, spec) in &bundle.skills {
         let source = resolve_skill_source(skill_name, spec)?;
         let dest = skills_dir.join(skill_name);
-        materialize_skill(skill_name, &source, &dest, cache_dir, source_base_dir)?;
+        // An explicit skill overrides whatever the whole-bundle layer placed
+        // under the same name — clear it first so link/copy start clean.
+        remove_existing(&dest)?;
+        materialize_skill(
+            skill_name,
+            &source,
+            &dest,
+            cache_dir,
+            source_base_dir,
+            bundle.link,
+        )?;
     }
 
     Ok(bundle_root)
+}
+
+/// Remove a path whether it is a symlink, file, or directory. A no-op if absent.
+fn remove_existing(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_dir() => {
+            fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))
+        }
+        Ok(_) => {
+            fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))
+        }
+        Err(_) => Ok(()),
+    }
 }
 
 /// Resolve a skill's source spec, requiring exactly one source to be declared.
@@ -82,9 +111,14 @@ fn materialize_bundle_dir(
     }
 }
 
-/// Copy every skill directory (one containing `SKILL.md`) from a bundle
-/// source's `skills/` folder into the assembled bundle.
-fn copy_bundle_skills(bundle_name: &str, bundle_dir: &Path, dest_skills_dir: &Path) -> Result<()> {
+/// Place every skill directory (one containing `SKILL.md`) from a bundle
+/// source's `skills/` folder into the assembled bundle, by symlink when `link`.
+fn place_bundle_skills(
+    bundle_name: &str,
+    bundle_dir: &Path,
+    dest_skills_dir: &Path,
+    link: bool,
+) -> Result<()> {
     let src_skills = bundle_dir.join("skills");
     if !src_skills.is_dir() {
         return Err(anyhow::anyhow!(
@@ -93,7 +127,7 @@ fn copy_bundle_skills(bundle_name: &str, bundle_dir: &Path, dest_skills_dir: &Pa
         ));
     }
 
-    let mut copied = 0;
+    let mut placed = 0;
     for entry in fs::read_dir(&src_skills)
         .with_context(|| format!("failed to read {}", src_skills.display()))?
     {
@@ -103,11 +137,18 @@ fn copy_bundle_skills(bundle_name: &str, bundle_dir: &Path, dest_skills_dir: &Pa
         if !skill_path.is_dir() || !skill_path.join("SKILL.md").is_file() {
             continue;
         }
-        copy_dir_all(&skill_path, &dest_skills_dir.join(entry.file_name()))?;
-        copied += 1;
+        let name = entry.file_name();
+        let dest = dest_skills_dir.join(&name);
+        let skill_name = name.to_string_lossy();
+        if link {
+            link_skill_dir(&skill_name, &skill_path, &dest)?;
+        } else {
+            copy_dir_all(&skill_path, &dest)?;
+        }
+        placed += 1;
     }
 
-    if copied == 0 {
+    if placed == 0 {
         return Err(anyhow::anyhow!(
             "bundle '{bundle_name}' source has no skills under {}",
             src_skills.display()
@@ -117,17 +158,23 @@ fn copy_bundle_skills(bundle_name: &str, bundle_dir: &Path, dest_skills_dir: &Pa
 }
 
 /// Materialize a single skill into `dest` (a directory containing `SKILL.md`).
+/// A local source is symlinked when `link`; remote and url sources are copied.
 fn materialize_skill(
     skill_name: &str,
     source: &Source,
     dest: &Path,
     cache_dir: &Path,
     base_dir: &Path,
+    link: bool,
 ) -> Result<()> {
     match source {
         Source::Local(path) => {
             let source = config::resolve_source_from(path, base_dir);
-            copy_skill_dir(skill_name, &source, dest)
+            if link {
+                link_skill_dir(skill_name, &source, dest)
+            } else {
+                copy_skill_dir(skill_name, &source, dest)
+            }
         }
         Source::Git {
             repo,
@@ -224,7 +271,8 @@ fn resolve_repo_path(repo_dir: &Path, bundle_path: &str) -> Result<PathBuf> {
     Ok(repo_dir.join(path))
 }
 
-fn copy_skill_dir(skill_name: &str, source: &Path, dest: &Path) -> Result<()> {
+/// A skill source must be a directory containing a `SKILL.md`.
+fn validate_skill_dir(skill_name: &str, source: &Path) -> Result<()> {
     if !source.is_dir() {
         return Err(anyhow::anyhow!(
             "skill '{}' source directory not found: {}",
@@ -239,7 +287,34 @@ fn copy_skill_dir(skill_name: &str, source: &Path, dest: &Path) -> Result<()> {
             source.display()
         ));
     }
+    Ok(())
+}
+
+fn copy_skill_dir(skill_name: &str, source: &Path, dest: &Path) -> Result<()> {
+    validate_skill_dir(skill_name, source)?;
     copy_dir_all(source, dest)
+}
+
+/// Live-link a skill: symlink `dest` at the source working tree so edits flow
+/// both ways. The symlink points at the source's canonical absolute path, so it
+/// survives even if the source was declared relative to the config.
+fn link_skill_dir(skill_name: &str, source: &Path, dest: &Path) -> Result<()> {
+    validate_skill_dir(skill_name, source)?;
+    let target = fs::canonicalize(source).with_context(|| {
+        format!(
+            "failed to resolve skill '{}' source path {}",
+            skill_name,
+            source.display()
+        )
+    })?;
+    crate::linker::create_symlink(&target, dest).with_context(|| {
+        format!(
+            "failed to link skill '{}' at {}",
+            skill_name,
+            dest.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn copy_dir_all(source: &Path, dest: &Path) -> Result<()> {
@@ -395,6 +470,7 @@ mod tests {
     use super::*;
 
     /// Build a bundle from an optional whole-bundle source plus explicit skills.
+    /// `link` is true (the default) unless a test overrides `.link`.
     fn bundle_with(source: SourceSpec, skills: &[(&str, SourceSpec)]) -> Bundle {
         Bundle {
             harnesses: Vec::new(),
@@ -403,6 +479,7 @@ mod tests {
                 .iter()
                 .map(|(name, spec)| ((*name).to_string(), spec.clone()))
                 .collect(),
+            link: true,
         }
     }
 
@@ -421,16 +498,8 @@ mod tests {
         run_git(dir, &["commit", "--quiet", "-m", "init"]).unwrap();
     }
 
-    #[test]
-    fn test_assemble_bundle_copies_local_skill() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().join("cache");
-        let source = tmp.path().join("source").join("code-design");
-        fs::create_dir_all(source.join("agents")).unwrap();
-        fs::write(source.join("SKILL.md"), "---\nname: code-design\n---\n").unwrap();
-        fs::write(source.join("agents").join("openai.yaml"), "version: 1\n").unwrap();
-
-        let bundle = bundle_with(
+    fn local_skill_bundle(source: &Path) -> Bundle {
+        bundle_with(
             SourceSpec::default(),
             &[(
                 "code-design",
@@ -439,22 +508,63 @@ mod tests {
                     ..SourceSpec::default()
                 },
             )],
-        );
+        )
+    }
+
+    #[test]
+    fn test_assemble_bundle_copies_local_skill_when_link_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("cache");
+        let source = tmp.path().join("source").join("code-design");
+        fs::create_dir_all(source.join("agents")).unwrap();
+        fs::write(source.join("SKILL.md"), "---\nname: code-design\n---\n").unwrap();
+        fs::write(source.join("agents").join("openai.yaml"), "version: 1\n").unwrap();
+
+        let mut bundle = local_skill_bundle(&source);
+        bundle.link = false;
 
         let bundle_root = assemble_bundle("generic", &bundle, &base, tmp.path()).unwrap();
 
-        assert_eq!(bundle_root, base.join("bundles").join("generic"));
-        assert!(bundle_root
-            .join("skills")
-            .join("code-design")
-            .join("SKILL.md")
-            .exists());
-        assert!(bundle_root
-            .join("skills")
-            .join("code-design")
-            .join("agents")
-            .join("openai.yaml")
-            .exists());
+        let installed = bundle_root.join("skills").join("code-design");
+        // A copy: a real directory, not a symlink, with the companion file.
+        assert!(!installed
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(installed.join("SKILL.md").exists());
+        assert!(installed.join("agents").join("openai.yaml").exists());
+    }
+
+    #[test]
+    fn test_assemble_bundle_links_local_skill_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("cache");
+        let source = tmp.path().join("source").join("code-design");
+        write_skill_dir(&source, "code-design");
+
+        // Default bundle.link == true.
+        let bundle = local_skill_bundle(&source);
+        let bundle_root = assemble_bundle("generic", &bundle, &base, tmp.path()).unwrap();
+
+        let installed = bundle_root.join("skills").join("code-design");
+        // A live link: the assembled entry is a symlink at the source tree.
+        assert!(installed
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&installed).unwrap(),
+            fs::canonicalize(&source).unwrap()
+        );
+
+        // Edits are bidirectional: writing through the link reaches the source.
+        fs::write(installed.join("SKILL.md"), "EDITED VIA HARNESS").unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join("SKILL.md")).unwrap(),
+            "EDITED VIA HARNESS"
+        );
     }
 
     #[test]
@@ -521,6 +631,13 @@ mod tests {
         assert!(skills.join("code-design").join("SKILL.md").exists());
         assert!(skills.join("technical-writing").join("SKILL.md").exists());
         assert!(!skills.join("README.md").exists());
+        // Local whole-bundle source links live by default.
+        assert!(skills
+            .join("code-design")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
@@ -557,6 +674,15 @@ mod tests {
         let bundle_root =
             assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
 
+        // A git whole-bundle source is copied even with link on (default): the
+        // git cache is not a working tree to link against.
+        assert!(!bundle_root
+            .join("skills")
+            .join("code-design")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert!(bundle_root
             .join("skills")
             .join("code-design")
