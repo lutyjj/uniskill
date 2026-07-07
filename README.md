@@ -4,7 +4,7 @@ Wire named skill groups into multiple agent harnesses. A bundle is a routing
 layer: it names a set of skills and says which harnesses receive them. A bundle
 can be pulled whole from a remote, composed from individual skills, or both.
 
-## What It Does
+## What it does
 
 uniskill reads a config file, assembles each declared bundle into a local cache,
 and creates symlinks at every target harness path. A single bundle can install to
@@ -13,10 +13,10 @@ custom harness you define.
 
 A bundle draws skills from two composable layers:
 
-- **Whole-bundle source** — put `source` or `repo` + `path` on the bundle to
+- **Whole-bundle source**: put `source` or `repo` + `path` on the bundle to
   point at a bundle directory (one holding a `skills/` folder) and pull every
   skill it declares as a unit. Add a skill upstream and the next sync picks it up.
-- **Explicit skills** — `[bundles.<name>.skills.<skill>]` entries that add to, or
+- **Explicit skills**: `[bundles.<name>.skills.<skill>]` entries that add to, or
   override by name, whatever the bundle source provided.
 
 The same source vocabulary applies to a whole bundle or a single skill:
@@ -27,21 +27,21 @@ The same source vocabulary applies to a whole bundle or a single skill:
 
 A local `source` is **linked live** by default (`link = true`): the harness
 symlinks straight to your working tree, so edits from any harness land in the
-source and `git pull` is live — re-sync only to add or remove a skill. Set
+source and `git pull` is live. Run `sync` again only to add or remove a skill. Set
 `link = false` on a bundle to copy instead. Remote `repo` and `url` sources are
 always copied.
 
-`sync` is deterministic and self-healing: bundles are processed in sorted order,
-a bundle that fails to build is reported and skipped instead of aborting the run,
-and links from a previous sync that are no longer in the config are pruned. Only
-uniskill's own symlinks are ever removed — hand-placed files are left alone.
+`sync` is deterministic and conservative. Bundles are processed in sorted order.
+A bundle that fails to build is reported and skipped. Links from a previous sync
+that are no longer in the config are pruned. Only uniskill-owned symlinks are
+removed; hand-placed files are left alone.
 
-## What It Does Not Do
+## What it does not do
 
 uniskill does not publish skills, handle semver dependency solving, or modify
 harness configuration beyond creating and updating symlinks.
 
-## Quick Start
+## Quick start
 
 ### Install
 
@@ -58,11 +58,11 @@ cargo build --release
 cp target/release/uniskill ~/.local/bin/
 ```
 
-**From a GitHub Release:**
+**From a GitHub release:**
 
 Download the latest asset for your platform from [Releases](../../releases).
-Raw binaries are attached for direct installs, and tarballs are attached for
-preserving executable metadata:
+Release assets include raw binaries for direct installs and tarballs that
+preserve executable metadata:
 
 ```bash
 mkdir -p ~/.local/bin
@@ -112,7 +112,7 @@ uniskill sync
 Running `sync` twice reports "ok" for every already-correct skill. Exit code 1
 indicates conflicts or broken symlinks.
 
-## Skill Structure
+## Skill structure
 
 Local and git-backed skills point at a skill directory:
 
@@ -128,9 +128,9 @@ the harness through the symlink.
 
 URL-backed skills fetch a single `SKILL.md` into the cache.
 
-## Config Reference
+## Config reference
 
-### Global Config
+### Global config
 
 Global config lives at `~/.config/uniskill/config.toml` unless `--config` is
 provided.
@@ -138,22 +138,28 @@ provided.
 | Key | Type | Description |
 |-----|------|-------------|
 | `bundles.<bundle>.harnesses` | array | Harness names that receive this bundle |
+| `bundles.<bundle>.source` | string | Local bundle directory containing `skills/` |
+| `bundles.<bundle>.repo` | string | Git repository containing a bundle directory |
+| `bundles.<bundle>.ref` | string | Optional branch, tag, or commit for `repo` |
+| `bundles.<bundle>.path` | string | Optional bundle path inside `repo` |
+| `bundles.<bundle>.link` | boolean | Link local sources live when `true`; defaults to `true` |
 | `bundles.<bundle>.skills.<skill>.source` | string | Local skill directory |
 | `bundles.<bundle>.skills.<skill>.url` | string | HTTP(S) URL for `SKILL.md` |
 | `bundles.<bundle>.skills.<skill>.repo` | string | Git repository containing the skill |
 | `bundles.<bundle>.skills.<skill>.ref` | string | Optional branch, tag, or commit |
-| `bundles.<bundle>.skills.<skill>.path` | string | Skill directory path inside `repo` |
+| `bundles.<bundle>.skills.<skill>.path` | string | Optional skill path inside `repo` |
 | `harnesses.<name>.pattern` | string | Target pattern containing `{name}` |
 | `harnesses.<name>.label` | string | Optional display label |
 
 Each skill must declare exactly one source kind: `source`, `url`, or `repo`.
-Git-backed skills must also declare `path`.
+Git-backed skills use the repository root when `path` is omitted. `ref` and
+`path` are valid only with `repo`.
 
 GitHub shorthands such as `owner/repo`, `gh:owner/repo`, and
 `github:owner/repo` resolve to SSH URLs. Plain SSH, HTTPS, and local git paths
 are passed through.
 
-### Project Config
+### Project config
 
 Project config is `uniskill.toml` in the current working directory. Relative
 `source`, local `repo`, and custom harness paths resolve against the project
@@ -162,19 +168,19 @@ root.
 Built-in harnesses can be referenced directly by name. User-defined harnesses
 override built-ins with the same name.
 
-## Environment Variables
+## Environment variables
 
 Paths support `$VAR` and `${VAR}` expansion. Unresolvable variables are left
 unchanged, so use variables that exist on every target machine.
 
-## Built-In Harnesses
+## Built-in harnesses
 
 | Name | Pattern | Scope |
 |------|---------|-------|
 | `pi` | `$HOME/.agents/skills/{name}` | global |
 | `claude-code` | `$HOME/.claude/skills/{name}` | global |
 
-## Release Process
+## Release process
 
 `make release` is the local release gate. It checks formatting, runs clippy,
 runs tests, builds the release binary, and writes distributable assets to
@@ -184,18 +190,20 @@ runs tests, builds the release binary, and writes distributable assets to
 make release
 ```
 
-Tag releases with `v<version>` matching `Cargo.toml`. The GitHub release
-workflow runs the same gate for each supported target, publishes raw binaries,
-tarballs, and `checksums-sha256.txt`.
+Tag releases with `v<version>` matching `Cargo.toml`. Use a conventional commit
+subject for the release commit so the changelog generator has content. The
+GitHub release workflow runs the same gate for each supported target and
+publishes raw binaries, tarballs, and `checksums-sha256.txt`.
 
-## Sync Behavior
+## Sync behavior
 
 - **Idempotent**: existing symlinks report "ok" on re-run
 - **Updated**: symlink replaced because it points to the wrong source or is broken
-- **Conflict**: non-symlink file exists at target, so the skill is skipped
+- **Conflict**: a non-symlink file or directory exists at the target, so the
+  skill is skipped
 - Unmanaged symlinks remain untouched
 
-## Design Docs
+## Design docs
 
 - [Design overview](docs/DESIGN.md)
 - [User journeys](docs/USER_JOURNEY.md)

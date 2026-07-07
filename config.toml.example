@@ -16,8 +16,8 @@ url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/s
 
 # Live workflow: point at a LOCAL clone and edit from any harness. A local
 # `source` is symlinked straight to its working tree (link = true, the default),
-# so edits through a harness land in the repo and `git pull` is live — re-sync
-# only when you add or remove a skill. Relative paths resolve against this file.
+# so edits through a harness land in the repo and `git pull` is live. Run sync
+# again only when you add or remove a skill. Relative paths resolve against this file.
 [bundles.local-live]
 harnesses = ["pi", "claude-code"]
 source = "../bundles/generic"

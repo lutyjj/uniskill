@@ -1,4 +1,4 @@
-# Project-level config — everything installs into .agents/skills/ here.
+# Project-level config. Everything installs into .agents/skills/ here.
 # A whole local bundle and an explicit URL skill wired into one project harness.
 
 [harnesses.agents]

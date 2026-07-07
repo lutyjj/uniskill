@@ -12,7 +12,7 @@ choose sources.
 uniskill manages skill installation paths. It does not publish skills, solve
 versions, infer a repository layout, or edit harness configuration files.
 
-## Core Model
+## Core model
 
 ### Bundle
 
@@ -31,7 +31,7 @@ url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/s
 ```
 
 1. An optional **whole-bundle source** (`source`/`repo`+`path`) points at a
-   bundle directory — one containing a `skills/` folder — and pulls every skill
+   bundle directory, one containing a `skills/` folder, and pulls every skill
    under it as a unit.
 2. **Explicit skill entries** under `[bundles.<name>.skills.<skill>]` add to, or
    override by name, whatever the bundle source provided.
@@ -40,14 +40,14 @@ A bundle needs at least one layer. The bundle key is stable identity for logging
 and cache paths, not a source path, so a single bundle can mix local, URL, and
 git-backed skills while retaining one destination policy.
 
-### Link vs Copy
+### Link vs copy
 
 `link` (default `true`) controls how a **local** `source` reaches the assembled
 bundle:
 
 - `link = true`: the assembled skill is a symlink at the source working tree, so
-  edits made through a harness land in the source and `git pull` is live — a
-  re-sync is only needed to add or remove a skill.
+  edits made through a harness land in the source and `git pull` is live. Run
+  `sync` again only to add or remove a skill.
 - `link = false`: the local source is copied, snapshotting it.
 
 Remote `repo` and `url` sources are always copied regardless of `link`: the git
@@ -61,7 +61,7 @@ comes from:
 - `source`: local directory
 - `repo` (+ optional `ref`, `path`): git repository, optionally narrowed to a
   subdirectory at a branch, tag, or commit
-- `url`: HTTP(S) URL to one `SKILL.md` (skills only — a url is a single file,
+- `url`: HTTP(S) URL to one `SKILL.md` (skills only; a url is a single file,
   not a bundle)
 
 Exactly one of `source`, `repo`, or `url` may be set. `ref`/`path` require a
@@ -80,9 +80,9 @@ ref = "main"
 path = "bundles/generic/skills/code-design"
 ```
 
-## Source Types
+## Source types
 
-### Local Skill
+### Local skill
 
 ```toml
 [bundles.project.skills.release-helper]
@@ -92,7 +92,7 @@ source = "./skills/release-helper"
 The source directory must contain `SKILL.md`. Relative paths resolve against the
 config file's directory.
 
-### URL Skill
+### URL skill
 
 ```toml
 [bundles.generic.skills.caveman]
@@ -102,7 +102,7 @@ url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/s
 The URL body is cached as `SKILL.md`. URL skills cannot carry companion files
 unless those files are later represented as a richer source type.
 
-### Git Skill
+### Git skill
 
 ```toml
 [bundles.generic.skills.technical-writing]
@@ -117,7 +117,7 @@ provided, and copies the selected skill directory into the assembled bundle.
 GitHub shorthands (`owner/repo`, `gh:owner/repo`, `github:owner/repo`) resolve
 to SSH URLs. Plain SSH, HTTPS, and local git paths are passed through.
 
-### Whole Bundle
+### Whole bundle
 
 ```toml
 [bundles.generic]
@@ -127,10 +127,10 @@ ref = "main"
 path = "bundles/generic"
 ```
 
-The `source`/`repo` sits on the bundle itself and points at a bundle directory —
-one containing a `skills/` folder (a `meta.toml` alongside it is allowed and
-ignored). Every immediate subdirectory of `skills/` that contains a `SKILL.md`
-is copied into the assembled bundle. A `url` is not a valid whole-bundle source
+The `source`/`repo` sits on the bundle itself and points at a bundle directory,
+one containing a `skills/` folder. A `meta.toml` alongside it is allowed and
+ignored. Every immediate subdirectory of `skills/` that contains a `SKILL.md` is
+copied into the assembled bundle. A `url` is not a valid whole-bundle source
 because a url is a single file, not a directory tree.
 
 ## Harnesses
@@ -153,7 +153,7 @@ Built-ins:
 | `pi` | `$HOME/.agents/skills/{name}` |
 | `claude-code` | `$HOME/.claude/skills/{name}` |
 
-## Config Resolution
+## Config resolution
 
 Global config is read from `~/.config/uniskill/config.toml`, unless `--config`
 is provided. Project config is `uniskill.toml` in the current working directory.
@@ -167,33 +167,36 @@ Relative paths resolve against the config that declared them:
 Environment variables use `$VAR` and `${VAR}` syntax. Unresolvable variables are
 left unchanged.
 
-## Data Flow
+## Data flow
 
 1. Load built-in harnesses.
 2. Load config and merge custom harnesses.
 3. Load the previous run's link manifest.
-4. For each bundle **in sorted order**, clear and recreate its assembled cache
-   directory. A bundle that fails to build is reported and skipped — it does not
-   abort the run — and the process exits non-zero at the end.
-5. If the bundle has a whole-bundle source, place every skill under its `skills/`
-   folder into the bundle cache — symlinked for a local source when `link`,
-   copied otherwise.
-6. For each explicit skill entry, place its source into the bundle cache
+4. For each bundle **in sorted order**, validate its harnesses before changing
+   the bundle cache. A bundle with an unknown harness is reported and skipped.
+5. Assemble the bundle in a staging directory. If assembly fails, keep the
+   previous bundle cache and preserve its manifest entries.
+6. If the bundle has a whole-bundle source, place every skill under its `skills/`
+   folder into the staged bundle. Local sources are symlinked when `link = true`
+   and copied otherwise.
+7. For each explicit skill entry, place its source into the staged bundle
    (clearing any same-named skill first), adding to or overriding the
    whole-bundle skills by name.
-7. For each bundle-harness pair, create or update symlinks to cached skills,
+8. Promote the staged bundle cache over the previous bundle cache only after
+   assembly succeeds.
+9. For each bundle-harness pair, create or update symlinks to cached skills,
    recording each in the new manifest.
-8. Prune: remove any link from the previous manifest that was not installed this
-   run, then write the new manifest.
+10. Prune: remove any link from the previous manifest that was not installed
+   this run, then write the new manifest.
 
 For a linked local source the harness symlink resolves through the cache entry
 to the working tree, so the cache is an index of live links rather than copies.
 
-## State and Pruning
+## State and pruning
 
 uniskill records every link it installs in `state.toml` next to the assembled
-bundles. On the next sync it removes links that are no longer declared — a skill
-dropped from a bundle, or a whole bundle removed from the config — so config is
+bundles. On the next sync it removes links that are no longer declared, such as
+a skill dropped from a bundle or a whole bundle removed from the config. Config is
 the source of truth for what stays installed.
 
 Pruning is deliberately conservative. A link is removed only when it is still a
@@ -222,7 +225,7 @@ cache/
 
 Git repositories are cached separately under `cache/repos/`.
 
-## Symlink Strategy
+## Symlink strategy
 
 Symlinks point at absolute paths inside the assembled cache. A sync run:
 
