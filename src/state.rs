@@ -10,7 +10,7 @@ pub struct ManagedLink {
     /// Absolute path of the harness symlink.
     pub path: String,
     pub skill: String,
-    /// Harness label the link belongs to.
+    /// Stable harness key the link belongs to.
     pub harness: String,
     /// Bundle the link came from.
     pub bundle: String,
@@ -81,7 +81,7 @@ mod tests {
             links: vec![ManagedLink {
                 path: "/home/u/.agents/skills/code-design".to_string(),
                 skill: "code-design".to_string(),
-                harness: "Pi".to_string(),
+                harness: "pi".to_string(),
                 bundle: "generic".to_string(),
             }],
         };

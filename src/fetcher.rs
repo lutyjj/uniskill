@@ -23,12 +23,11 @@ pub fn assemble_bundle(
     source_base_dir: &Path,
 ) -> Result<PathBuf> {
     let bundle_root = cache_dir.join("bundles").join(bundle_name);
-    let skills_dir = bundle_root.join("skills");
-    if bundle_root.exists() {
-        fs::remove_dir_all(&bundle_root).with_context(|| {
-            format!("failed to clear bundle cache at {}", bundle_root.display())
-        })?;
-    }
+    let staging_root = cache_dir
+        .join("bundles")
+        .join(format!(".{bundle_name}.staging"));
+    let skills_dir = staging_root.join("skills");
+    remove_existing(&staging_root)?;
     fs::create_dir_all(&skills_dir)
         .with_context(|| format!("failed to create bundle cache at {}", skills_dir.display()))?;
 
@@ -59,6 +58,7 @@ pub fn assemble_bundle(
         )?;
     }
 
+    replace_bundle_cache(&staging_root, &bundle_root)?;
     Ok(bundle_root)
 }
 
@@ -73,6 +73,48 @@ fn remove_existing(path: &Path) -> Result<()> {
         }
         Err(_) => Ok(()),
     }
+}
+
+fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
+    let backup_root = sibling_cache_path(bundle_root, "previous")?;
+    remove_existing(&backup_root)?;
+
+    let had_existing = fs::symlink_metadata(bundle_root).is_ok();
+    if had_existing {
+        fs::rename(bundle_root, &backup_root).with_context(|| {
+            format!(
+                "failed to move existing bundle cache {} aside",
+                bundle_root.display()
+            )
+        })?;
+    }
+
+    match fs::rename(staging_root, bundle_root) {
+        Ok(()) => {
+            remove_existing(&backup_root)?;
+            Ok(())
+        }
+        Err(err) => {
+            if had_existing {
+                let _ = fs::rename(&backup_root, bundle_root);
+            }
+            Err(err).with_context(|| {
+                format!(
+                    "failed to promote staged bundle cache {} to {}",
+                    staging_root.display(),
+                    bundle_root.display()
+                )
+            })
+        }
+    }
+}
+
+fn sibling_cache_path(path: &Path, suffix: &str) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("cache path has no file name: {}", path.display()))?
+        .to_string_lossy();
+    Ok(path.with_file_name(format!(".{name}.{suffix}")))
 }
 
 /// Resolve a skill's source spec, requiring exactly one source to be declared.
@@ -133,8 +175,7 @@ fn place_bundle_skills(
     {
         let entry = entry?;
         let skill_path = entry.path();
-        // Only directories that actually contain a SKILL.md are skills.
-        if !skill_path.is_dir() || !skill_path.join("SKILL.md").is_file() {
+        if !crate::skill::is_skill_dir(&skill_path) {
             continue;
         }
         let name = entry.file_name();
@@ -248,9 +289,11 @@ fn fetch_git_repo(repo: &str, git_ref: Option<&str>, base_dir: &Path) -> Result<
 
     if let Some(requested_ref) = git_ref {
         run_git(&repo_dir, &["checkout", "--quiet", requested_ref])?;
-        let _ = run_git(&repo_dir, &["pull", "--ff-only", "--quiet"]);
+        if checked_out_branch(&repo_dir)?.is_some() {
+            run_git(&repo_dir, &["pull", "--ff-only", "--quiet"])?;
+        }
     } else {
-        let _ = run_git(&repo_dir, &["pull", "--ff-only", "--quiet"]);
+        run_git(&repo_dir, &["pull", "--ff-only", "--quiet"])?;
     }
 
     Ok(repo_dir)
@@ -273,14 +316,14 @@ fn resolve_repo_path(repo_dir: &Path, bundle_path: &str) -> Result<PathBuf> {
 
 /// A skill source must be a directory containing a `SKILL.md`.
 fn validate_skill_dir(skill_name: &str, source: &Path) -> Result<()> {
-    if !source.is_dir() {
-        return Err(anyhow::anyhow!(
-            "skill '{}' source directory not found: {}",
-            skill_name,
-            source.display()
-        ));
-    }
-    if !source.join("SKILL.md").is_file() {
+    if !crate::skill::is_skill_dir(source) {
+        if !source.is_dir() {
+            return Err(anyhow::anyhow!(
+                "skill '{}' source directory not found: {}",
+                skill_name,
+                source.display()
+            ));
+        }
         return Err(anyhow::anyhow!(
             "skill '{}' source has no SKILL.md: {}",
             skill_name,
@@ -373,7 +416,7 @@ fn is_github_shorthand(repo: &str) -> bool {
 }
 
 fn cache_key(value: &str) -> String {
-    value
+    let slug = value
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -384,7 +427,22 @@ fn cache_key(value: &str) -> String {
         })
         .collect::<String>()
         .trim_matches('-')
-        .to_string()
+        .to_string();
+    let hash = fnv1a64(value.as_bytes());
+    if slug.is_empty() {
+        format!("{hash:016x}")
+    } else {
+        format!("{slug}-{hash:016x}")
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn run_git(repo_dir: &Path, args: &[&str]) -> Result<()> {
@@ -412,6 +470,27 @@ fn run_command(command: &mut Command) -> Result<()> {
         stderr.trim(),
         stdout.trim()
     ))
+}
+
+fn checked_out_branch(repo_dir: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect checked-out branch in {}",
+                repo_dir.display()
+            )
+        })?;
+
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(Some(branch))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Download a single skill URL to the destination path.
@@ -564,6 +643,36 @@ mod tests {
         assert_eq!(
             fs::read_to_string(source.join("SKILL.md")).unwrap(),
             "EDITED VIA HARNESS"
+        );
+    }
+
+    #[test]
+    fn test_assemble_bundle_failure_keeps_existing_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let existing_skill = cache
+            .join("bundles")
+            .join("generic")
+            .join("skills")
+            .join("code-design");
+        write_skill_dir(&existing_skill, "old-code-design");
+
+        let invalid_source = tmp.path().join("invalid-bundle");
+        fs::create_dir_all(&invalid_source).unwrap();
+        let bundle = bundle_with(
+            SourceSpec {
+                source: Some(invalid_source.to_string_lossy().to_string()),
+                ..SourceSpec::default()
+            },
+            &[],
+        );
+
+        let result = assemble_bundle("generic", &bundle, &cache, tmp.path());
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(existing_skill.join("SKILL.md")).unwrap(),
+            "---\nname: old-code-design\n---\n"
         );
     }
 
@@ -820,6 +929,31 @@ mod tests {
             normalize_repo_url("https://github.com/lutyjj/agent-skills.git"),
             "https://github.com/lutyjj/agent-skills.git"
         );
+    }
+
+    #[test]
+    fn test_cache_key_keeps_sanitized_collisions_distinct() {
+        assert_ne!(cache_key("owner/repo"), cache_key("owner:repo"));
+    }
+
+    #[test]
+    fn test_fetch_git_repo_reports_failed_pull() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_repo = tmp.path().join("source");
+        write_skill_dir(&source_repo, "source");
+        init_git_repo(&source_repo);
+
+        let cache = tmp.path().join("cache");
+        let cached_repo = fetch_git_repo(&source_repo.to_string_lossy(), None, &cache).unwrap();
+        fs::write(cached_repo.join("SKILL.md"), "dirty local cache").unwrap();
+
+        fs::write(source_repo.join("SKILL.md"), "remote update").unwrap();
+        run_git(&source_repo, &["add", "."]).unwrap();
+        run_git(&source_repo, &["commit", "--quiet", "-m", "update"]).unwrap();
+
+        let result = fetch_git_repo(&source_repo.to_string_lossy(), None, &cache);
+
+        assert!(result.is_err());
     }
 
     #[test]

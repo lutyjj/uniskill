@@ -12,7 +12,7 @@ pub struct HarnessDef {
     pub pattern: String,
 }
 
-/// Build-in harness registry. Users can extend or override via config.
+/// Built-in harness registry. Users can extend or override via config.
 pub fn default_harnesses() -> HashMap<String, HarnessDef> {
     let mut map = HashMap::new();
 
@@ -35,15 +35,6 @@ pub fn default_harnesses() -> HashMap<String, HarnessDef> {
     map
 }
 
-/// Find a harness by name. Returns None if unknown.
-#[allow(dead_code)]
-pub fn find_harness<'a>(
-    name: &'a str,
-    registry: &'a HashMap<String, HarnessDef>,
-) -> Option<&'a HarnessDef> {
-    registry.get(name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,20 +47,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_known_harness() {
-        let registry = default_harnesses();
-        let pi = find_harness("pi", &registry);
-        assert!(pi.is_some());
-        assert_eq!(pi.unwrap().label, "Pi");
-    }
-
-    #[test]
-    fn test_find_unknown_harness_returns_none() {
-        let registry = default_harnesses();
-        assert!(find_harness("unknown-harness", &registry).is_none());
-    }
-
-    #[test]
     fn test_custom_registry_override() {
         let mut registry = HashMap::new();
         registry.insert(
@@ -79,7 +56,7 @@ mod tests {
                 pattern: "/custom/agents/skills/{name}".to_string(),
             },
         );
-        let pi = find_harness("pi", &registry);
+        let pi = registry.get("pi");
         assert!(pi.is_some());
         assert_eq!(pi.unwrap().label, "Pi (custom)");
     }

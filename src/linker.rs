@@ -10,7 +10,7 @@ pub struct SyncResult {
     pub status: SyncStatus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncStatus {
     /// Symlink already exists and points to the correct target
     Ok,
@@ -148,8 +148,9 @@ pub fn sync_bundle(source: &Path, pattern: &str) -> Vec<SyncResult> {
         };
 
         let skill_path = entry.path();
-        if !skill_path.is_dir() {
-            continue; // skip non-directories (files like .gitkeep, etc.)
+        if !crate::skill::is_skill_dir(&skill_path) {
+            // Skip files and incomplete directories.
+            continue;
         }
 
         // Resolve the install path using the harness pattern
@@ -333,11 +334,24 @@ mod tests {
 
         // Create a skill directory (should be picked up)
         fs::create_dir_all(skills_dir.join("good-skill")).unwrap();
+        fs::File::create(skills_dir.join("good-skill").join("SKILL.md")).unwrap();
         // Create a regular file (should be skipped)
         fs::write(skills_dir.join("not-a-skill.txt"), "ignore me").unwrap();
 
         let results = sync_bundle(&bundle_dir, "/any/target/{name}");
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_sync_bundle_skips_directories_without_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = tmp.path().join("bundle");
+        let skills_dir = bundle_dir.join("skills");
+        fs::create_dir_all(skills_dir.join("incomplete")).unwrap();
+
+        let results = sync_bundle(&bundle_dir, "/any/target/{name}");
+
+        assert!(results.is_empty());
     }
 
     #[test]

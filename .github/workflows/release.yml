@@ -45,10 +45,8 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --no-self-update
-          rustup default stable
+          rustup toolchain install --profile minimal --no-self-update
           rustup target add ${{ matrix.target }}
-          rustup component add rustfmt clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v6

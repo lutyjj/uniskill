@@ -116,18 +116,21 @@ impl SourceSpec {
 
     /// Classify into exactly one [`Source`], or `None` when nothing is declared.
     pub fn resolve(&self) -> std::result::Result<Option<Source>, SourceError> {
+        let source_count =
+            self.source.is_some() as u8 + self.repo.is_some() as u8 + self.url.is_some() as u8;
+        if source_count > 1 {
+            return Err(SourceError::Conflict);
+        }
+        if self.repo.is_none() && (self.git_ref.is_some() || self.path.is_some()) {
+            return Err(SourceError::Dangling);
+        }
+
         match (
             self.source.as_deref(),
             self.repo.as_deref(),
             self.url.as_deref(),
         ) {
-            (None, None, None) => {
-                if self.git_ref.is_some() || self.path.is_some() {
-                    Err(SourceError::Dangling)
-                } else {
-                    Ok(None)
-                }
-            }
+            (None, None, None) => Ok(None),
             (Some(path), None, None) => Ok(Some(Source::Local(path.to_string()))),
             (None, Some(repo), None) => Ok(Some(Source::Git {
                 repo: repo.to_string(),
@@ -135,7 +138,7 @@ impl SourceSpec {
                 path: self.path.clone(),
             })),
             (None, None, Some(url)) => Ok(Some(Source::Url(url.to_string()))),
-            _ => Err(SourceError::Conflict),
+            _ => unreachable!("source count was validated above"),
         }
     }
 }
@@ -195,51 +198,60 @@ pub struct ProjectConfigFile {
 /// Supports $VAR and ${VAR} syntax. Unresolvable vars pass through unchanged.
 pub fn expand_env_vars(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
+    let mut chars = s.chars().peekable();
 
-    while i < chars.len() {
-        if chars[i] == '$' && i + 1 < chars.len() {
-            if chars[i + 1] == '{' {
-                // ${VAR} syntax
-                if let Some(end) = s[i + 2..].find('}') {
-                    let var_name = &s[i + 2..i + 2 + end];
-                    if let Ok(value) = env::var(var_name) {
-                        result.push_str(&value);
-                    } else {
-                        // Leave unresolvable vars as-is
-                        result.push_str(&s[i..i + 2 + end + 1]);
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            result.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('{') => {
+                chars.next();
+                let mut var_name = String::new();
+                let mut closed = false;
+                for next in chars.by_ref() {
+                    if next == '}' {
+                        closed = true;
+                        break;
                     }
-                    i += 3 + end;
-                } else {
-                    result.push('$');
-                    i += 1;
+                    var_name.push(next);
                 }
-            } else {
-                // $VAR syntax — collect alphanumeric/underscore chars
-                let start = i + 1;
-                let mut end = start;
-                while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
-                    end += 1;
-                }
-                if end > start {
-                    let var_name: String = chars[start..end].iter().collect();
+
+                if closed {
                     if let Ok(value) = env::var(&var_name) {
                         result.push_str(&value);
                     } else {
-                        // Leave unresolvable vars as-is
-                        result.push('$');
+                        result.push_str("${");
                         result.push_str(&var_name);
+                        result.push('}');
                     }
-                    i = end;
                 } else {
                     result.push('$');
-                    i += 1;
+                    result.push('{');
+                    result.push_str(&var_name);
                 }
             }
-        } else {
-            result.push(chars[i]);
-            i += 1;
+            Some(next) if next.is_alphanumeric() || next == '_' => {
+                let mut var_name = String::new();
+                while let Some(next) = chars.peek().copied() {
+                    if next.is_alphanumeric() || next == '_' {
+                        var_name.push(next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                if let Ok(value) = env::var(&var_name) {
+                    result.push_str(&value);
+                } else {
+                    result.push('$');
+                    result.push_str(&var_name);
+                }
+            }
+            _ => result.push('$'),
         }
     }
 
@@ -384,6 +396,13 @@ source = "/tmp/skills/caveman"
     fn test_unresolvable_var_passes_through() {
         let result = expand_env_vars("$NONEXISTENT_VAR_PLACEHOLDER/path");
         assert_eq!(result, "$NONEXISTENT_VAR_PLACEHOLDER/path");
+    }
+
+    #[test]
+    fn test_expand_env_vars_handles_non_ascii_prefix() {
+        let home = env::var("HOME").unwrap();
+        let result = expand_env_vars("żółć/${HOME}/skills");
+        assert_eq!(result, format!("żółć/{home}/skills"));
     }
 
     #[test]
@@ -726,6 +745,26 @@ link = false
             ..SourceSpec::default()
         };
         assert!(!spec.is_empty());
+        assert_eq!(spec.resolve(), Err(SourceError::Dangling));
+    }
+
+    #[test]
+    fn test_source_spec_rejects_path_on_local_source() {
+        let spec = SourceSpec {
+            source: Some("./skills".to_string()),
+            path: Some("ignored".to_string()),
+            ..SourceSpec::default()
+        };
+        assert_eq!(spec.resolve(), Err(SourceError::Dangling));
+    }
+
+    #[test]
+    fn test_source_spec_rejects_ref_on_url_source() {
+        let spec = SourceSpec {
+            url: Some("https://example.com/SKILL.md".to_string()),
+            git_ref: Some("main".to_string()),
+            ..SourceSpec::default()
+        };
         assert_eq!(spec.resolve(), Err(SourceError::Dangling));
     }
 }

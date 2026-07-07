@@ -10,9 +10,9 @@ DIST_BIN         := $(DIST_DIR)/$(PACKAGE_NAME)
 DIST_TARBALL     := $(DIST_DIR)/$(PACKAGE_NAME).tar.gz
 DIST_SHA256      := $(DIST_DIR)/$(PACKAGE_NAME).sha256
 
-## Build release binary (auto-formats first)
+## Build release binary (fails on formatting drift)
 .PHONY: build
-build: fmt-fix
+build: fmt-check
 	@echo ">> building $(TARGET_TRIPLE) (release)"
 	cargo build --release --target $(TARGET_TRIPLE)
 	@echo "✓ → $(RELEASE_BIN)"
