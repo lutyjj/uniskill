@@ -1,5 +1,5 @@
 PROJECT          := uniskill
-RUST_VERSION     ?= 1.96.1
+RUST_VERSION     := $(shell sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
 TARGET_TRIPLE    ?= $(shell scripts/host-triple.sh)
 INSTALL_DIR      ?= $(HOME)/.local/bin
 DIST_DIR         ?= dist

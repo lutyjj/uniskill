@@ -131,6 +131,16 @@ jobs:
         env:
           GITHUB_REPO: ${{ github.repository }}
 
+      - name: Validate changelog
+        shell: bash
+        env:
+          RELEASE_NOTES: ${{ steps.changelog.outputs.content }}
+        run: |
+          if [[ -z "${RELEASE_NOTES//[[:space:]]/}" ]]; then
+            echo "generated changelog is empty; use a conventional commit subject or update cliff.toml" >&2
+            exit 1
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
