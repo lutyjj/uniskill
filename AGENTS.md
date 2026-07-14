@@ -19,6 +19,13 @@ Failed bundle builds are failures, not removals. Preserve the previous cache
 and previous managed links when a source cannot be fetched, a source is invalid,
 or a harness is unknown.
 
+A worktree sync (`sync --worktree`) links the already-assembled cache into a
+linked git worktree; it never fetches. It keeps a separate, worktree-scoped
+manifest so a later main sync never prunes worktree links and a worktree sync
+never prunes the main tree's. Installing the git hook (`hook install`) must never
+overwrite a `post-checkout` hook uniskill did not write, and the global
+dispatcher must chain to a repo's own hooks rather than shadow them.
+
 ## Keep responsibilities separated
 
 Modules own narrow jobs:
@@ -29,10 +36,12 @@ Modules own narrow jobs:
 | `config.rs` | TOML shapes, source validation, env var and path resolution |
 | `fetcher.rs` | Materializing local, URL, and git sources into the bundle cache |
 | `harnesses.rs` | Built-in harness registry |
+| `hook.rs` | Installing the `post-checkout` git hook and global dispatcher |
 | `linker.rs` | Harness symlink creation and status classification |
 | `skill.rs` | Shared skill-directory predicate |
 | `state.rs` | Manifest load/save and managed-link ownership checks |
 | `sync.rs` | Sync orchestration and structured reports |
+| `worktree.rs` | Git worktree topology and harness-path retargeting |
 
 Do not move filesystem mutation, output formatting, and config parsing into the
 same function. If a change crosses those boundaries, add a small API between

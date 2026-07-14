@@ -112,6 +112,36 @@ uniskill sync
 Running `sync` twice reports "ok" for every already-correct skill. Exit code 1
 indicates conflicts or broken symlinks.
 
+## Git worktrees
+
+A git worktree is a fresh checkout of tracked files only, so the skill symlinks
+`sync` installs into a project (`.claude/skills/`, `.agents/skills/`) never
+appear in a new worktree — every worktree starts without them. Because this is a
+git-level fact, no single-harness fix covers it; the trigger lives in git.
+
+Install a `post-checkout` hook once and every worktree created afterward — by
+Claude Code, Codex, `git worktree add`, or any tool — syncs itself:
+
+```bash
+# This repo only:
+uniskill hook install
+
+# Or machine-wide, for every repo and every future clone:
+uniskill --config <global-config> hook install --global
+```
+
+`--global` sets git's `core.hooksPath` to a uniskill dispatcher and shims the
+standard hook names so each repo's own hooks still run. It refuses to overwrite a
+`core.hooksPath` you already set, and per-repo install refuses to overwrite a
+`post-checkout` hook you wrote yourself.
+
+The hook runs `uniskill sync --worktree`, which links the already-assembled cache
+into the current worktree — retargeting each repo-scoped harness path onto it —
+without refetching. Machine-global harness paths (`$HOME/.claude/skills`) are left
+alone; they are already visible from every worktree. Worktree links are tracked
+in a separate manifest, so a later `uniskill sync` in the main tree never prunes
+them. You can also run `uniskill sync --worktree` by hand from inside a worktree.
+
 ## Skill structure
 
 Local and git-backed skills point at a skill directory:

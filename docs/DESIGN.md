@@ -153,6 +153,29 @@ Built-ins:
 | `pi` | `$HOME/.agents/skills/{name}` |
 | `claude-code` | `$HOME/.claude/skills/{name}` |
 
+## Git worktrees
+
+A linked git worktree is a fresh checkout of tracked files only. The skill
+symlinks `sync` installs live in ignored directories (`.agents/`,
+`.claude/skills/`), so they never appear in a new worktree. The link *kind* is
+irrelevant — nothing untracked is reproduced — so the fix cannot be a different
+symlink or a per-harness trigger. The one harness-agnostic trigger is git's own
+`post-checkout` hook, which fires in the new worktree on `git worktree add` (and
+clone) whatever tool ran it.
+
+`uniskill hook install` writes that hook; `--global` installs a `core.hooksPath`
+dispatcher that shims every client hook name and chains to a repo's own hooks so
+none are shadowed. The hook runs `uniskill sync --worktree`.
+
+`sync --worktree` links the cache a normal sync already assembled into the
+current worktree. It resolves the same bundles and harnesses, then for each
+harness whose target lies inside the repository's main worktree it rewrites that
+prefix onto the worktree root (`worktree.rs`). Harnesses outside the main
+worktree — a machine-global path, or another repo — are skipped, since a global
+skills directory is already visible from every worktree. It never fetches, which
+keeps the hook fast and offline-safe; a bundle the main sync has not assembled
+yet is reported and skipped.
+
 ## Config resolution
 
 Global config is read from `~/.config/uniskill/config.toml`, unless `--config`
@@ -211,6 +234,12 @@ identical output.
 Global cache lives under `$XDG_CACHE_HOME/uniskill/` when available, otherwise
 `./.uniskill-cache`. Project config uses `.uniskill-cache/` next to the project
 config.
+
+A worktree sync writes its manifest to `.uniskill-cache/state.toml` inside the
+worktree, not the shared `state.toml`. Main and worktree runs therefore prune
+only their own links: a main sync never removes a worktree's links, and a
+worktree sync never removes the main tree's. The manifest is also self-cleaning
+— it goes away when the worktree is removed.
 
 Assembled bundle layout:
 
