@@ -80,7 +80,10 @@ table shapes are rejected. Native files and individual outputs are limited to
 
 All MCP files and ownership state are planned before writing. A private,
 mode-0600 journal records before/after contents; atomic file replacement and
-fsync protect each write. Sync locks coordinate uniskill writers. A failed or
+fsync protect each write. Persistent mode-0600 `.uniskill-mcp-<digest>.lock`
+sidecars beside native files coordinate writers across config and cache scopes.
+Destination locks are acquired in path order before recovery and planning;
+ownership manifests remain scoped to their caches. A failed or
 interrupted apply rolls back its own bytes; a later sync recovers the journal.
 Files edited since the interrupted write are preserved and reported. Recovery
 I/O failures require inspection before continuing. The journal can contain

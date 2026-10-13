@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -89,8 +90,11 @@ pub fn lock(state_dir: &Path) -> Result<File> {
     if metadata.permissions().mode() & 0o777 != 0o700 {
         fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))?;
     }
-    let lock_path = state_dir.join("lock");
-    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+    lock_file(&state_dir.join("lock"))
+}
+
+fn lock_file(path: &Path) -> Result<File> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             bail!("MCP lock is not a regular file");
         }
@@ -101,26 +105,65 @@ pub fn lock(state_dir: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .mode(0o600)
-        .open(state_dir.join("lock"))?;
+        .open(path)?;
     file.lock()?;
     Ok(file)
+}
+
+/// Persistent sidecars keep the lock identity stable across native file replacements.
+pub fn lock_destinations(paths: &std::collections::BTreeSet<PathBuf>) -> Result<Vec<File>> {
+    paths
+        .iter()
+        .map(|path| {
+            let parent = path.parent().expect("absolute file has a parent");
+            fs::create_dir_all(parent)?;
+            let digest = Sha256::digest(path.as_os_str().as_encoded_bytes());
+            lock_file(&parent.join(format!(".uniskill-mcp-{digest:x}.lock")))
+        })
+        .collect()
 }
 
 pub fn pending(state_dir: &Path) -> bool {
     state_dir.join("journal.json").exists()
 }
 
-/// Roll back only bytes from this journal. A subsequent external edit is never replaced.
-pub fn recover(state_dir: &Path) -> Result<Vec<PathBuf>> {
-    let path = state_dir.join("journal.json");
-    let Some(bytes) = read_limited(&path, MAX_JOURNAL_BYTES)? else {
-        return Ok(Vec::new());
+fn read_journal(state_dir: &Path) -> Result<Option<Journal>> {
+    let Some(bytes) = read_limited(&state_dir.join("journal.json"), MAX_JOURNAL_BYTES)? else {
+        return Ok(None);
     };
     let journal: Journal = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow!("invalid MCP transaction journal; recovery requires inspection"))?;
     if journal.version != 1 {
         bail!("unsupported MCP transaction journal version");
     }
+    if journal
+        .updates
+        .iter()
+        .any(|update| !update.path.is_absolute())
+    {
+        bail!("MCP transaction journal contains a relative path");
+    }
+    Ok(Some(journal))
+}
+
+pub fn journal_targets(state_dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(read_journal(state_dir)?
+        .map(|journal| {
+            journal
+                .updates
+                .into_iter()
+                .map(|update| update.path)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Roll back only bytes from this journal. A subsequent external edit is never replaced.
+pub fn recover(state_dir: &Path) -> Result<Vec<PathBuf>> {
+    let Some(journal) = read_journal(state_dir)? else {
+        return Ok(Vec::new());
+    };
+    let path = state_dir.join("journal.json");
     let mut preserved = Vec::new();
     for update in journal.updates.iter().rev() {
         let current = read(&update.path)?;

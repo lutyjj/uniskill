@@ -165,7 +165,7 @@ none are shadowed. The hook runs `uniskill sync --worktree`.
 current worktree. It resolves the same bundles and harnesses, then for each
 harness whose target lies inside the repository's main worktree it rewrites that
 prefix onto the worktree root (`worktree.rs`). Harnesses outside the main
-worktree; a machine-global path, or another repo; are skipped, since a global
+worktree (a machine-global path or another repo) are skipped, since a global
 skills directory is already visible from every worktree. It never fetches, which
 keeps the hook fast and offline-safe; a bundle the main sync has not assembled
 yet is reported and skipped.
@@ -234,8 +234,8 @@ config.
 A worktree sync writes its manifest to `.uniskill-cache/state.toml` inside the
 worktree, not the shared `state.toml`. Main and worktree runs therefore prune
 only their own links: a main sync never removes a worktree's links, and a
-worktree sync never removes the main tree's. The manifest is also self-cleaning
-;  it goes away when the worktree is removed.
+worktree sync never removes the main tree's. Removing a worktree also removes
+its manifest.
 
 Assembled bundle layout:
 

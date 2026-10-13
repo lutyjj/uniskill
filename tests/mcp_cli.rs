@@ -533,3 +533,192 @@ command = "fixture"
     assert!(!f.run(&["--mcp-only"]).status.success());
     assert!(!f.path("native.json").exists());
 }
+
+#[test]
+fn native_connection_aliases_cannot_be_supplied_as_policy_options() {
+    let f = Fixture::new(
+        &format!(
+            "{JSON_TARGET}\n[mcp.docs.headers]\nAuthorization = 'literal'\n\
+         [mcp.docs.options.fixture.env_http_headers]\nAuthorization = 'TOKEN'\n"
+        )
+        .replace(
+            "table = [\"tools\", \"servers\"]",
+            "table = [\"tools\", \"servers\"]\nfields = { env_headers = 'env_http_headers' }",
+        ),
+    );
+    assert!(!f.run(&["--mcp-only"]).status.success());
+    assert!(!f.path("native.json").exists());
+    assert!(!f.path("cache/uniskill/mcp/state.json").exists());
+}
+
+#[test]
+fn final_names_include_unmanaged_entries_but_allow_owned_renames() {
+    let f = Fixture::new(&JSON_TARGET.replace("mcp.docs", "mcp.a-b"));
+    let original = br#"{"tools":{"servers":{"a_b":{"command":"manual"}}}}"#;
+    f.write("native.json", original);
+    assert!(!f.run(&["--mcp-only"]).status.success());
+    assert_eq!(fs::read(f.path("native.json")).unwrap(), original);
+    assert!(!f.path("cache/uniskill/mcp/state.json").exists());
+    f.write(
+        "native.json",
+        br#"{"tools":{"servers":{"manual":{"command":"manual"}}}}"#,
+    );
+    fs::write(&f.config, JSON_TARGET.replace("mcp.docs", "mcp.a_b")).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    fs::write(&f.config, JSON_TARGET.replace("mcp.docs", "mcp.a-b")).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    let servers = f.json("native.json")["tools"]["servers"]
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(servers.len(), 2);
+    assert!(servers.contains_key("a-b"));
+    assert!(servers.contains_key("manual"));
+    succeeded(f.run(&["--check-mcp"]));
+}
+
+#[test]
+fn updating_skills_through_the_complete_wrapper_preserves_mcp_ownership() {
+    let f = Fixture::new("includes = ['skills.toml', 'mcp.toml']");
+    f.write("mcp.toml", JSON_TARGET.as_bytes());
+    f.write(
+        "skills.toml",
+        br#"
+[harnesses.skills]
+pattern = "skills/{name}"
+[bundles.local]
+harnesses = ["skills"]
+source = "source"
+"#,
+    );
+    f.write("source/skills/first/SKILL.md", b"first");
+    succeeded(f.run(&[]));
+    let paths = [
+        f.path("native.json"),
+        f.path("cache/uniskill/mcp/state.json"),
+    ];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|p| {
+            (
+                fs::read(p).unwrap(),
+                fs::metadata(p).unwrap().modified().unwrap(),
+            )
+        })
+        .collect();
+    f.write("source/skills/second/SKILL.md", b"second");
+    succeeded(f.run(&[]));
+    assert!(f.path("skills/second/SKILL.md").exists());
+    for (path, old) in paths.iter().zip(before) {
+        assert_eq!(
+            (
+                fs::read(path).unwrap(),
+                fs::metadata(path).unwrap().modified().unwrap()
+            ),
+            old
+        );
+    }
+}
+
+#[test]
+fn separate_project_writers_and_recovery_share_the_native_destination_lock() {
+    use std::fs::{File, TryLockError};
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let native = home.join(".claude.json");
+    fs::write(&native, br#"{"keep":true}"#).unwrap();
+    let projects: Vec<_> = ["left", "right"]
+        .iter()
+        .map(|name| {
+            let project = temp.path().join(name);
+            fs::create_dir(&project).unwrap();
+            fs::write(
+                project.join("uniskill.toml"),
+                format!("[mcp.{name}]\nharnesses = ['claude-code']\ncommand = '{name}'\n"),
+            )
+            .unwrap();
+            project
+        })
+        .collect();
+    let command = |project: &Path| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_uniskill"));
+        cmd.args(["sync", "--mcp-only"])
+            .current_dir(project)
+            .env("HOME", &home)
+            .env_remove("CLAUDE_CONFIG_DIR");
+        cmd
+    };
+    succeeded(command(&projects[0]).output().unwrap());
+    let sidecar = fs::read_dir(&home)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".uniskill-mcp-")
+        })
+        .unwrap();
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .open(sidecar)
+        .unwrap();
+    lock.lock().unwrap();
+    let before = fs::read(&native).unwrap();
+    // A completed write with a journal still awaiting removal must also
+    // recover under the destination lock used by the other project.
+    let state = projects[0].join(".uniskill-cache/mcp");
+    let after = String::from_utf8(before).unwrap();
+    fs::write(state.join("journal.json"), serde_json::to_vec(&json!({
+        "version":1,"updates":[{"path":native,"before":"{\"keep\":true}","after":after,"mode":384}]
+    })).unwrap()).unwrap();
+    let children: Vec<_> = projects
+        .iter()
+        .map(|p| command(p).spawn().unwrap())
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for project in &projects {
+        loop {
+            let waiting = File::options()
+                .read(true)
+                .write(true)
+                .open(project.join(".uniskill-cache/mcp/lock"))
+                .is_ok_and(|file| matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
+            if waiting {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "writer did not reach its native lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(fs::read_to_string(&native).unwrap(), after);
+    assert!(state.join("journal.json").exists());
+    drop(lock);
+    for child in children {
+        succeeded(child.wait_with_output().unwrap());
+    }
+    let result: Value = serde_json::from_slice(&fs::read(&native).unwrap()).unwrap();
+    assert_eq!(result["keep"], true);
+    assert_eq!(result["mcpServers"]["left"]["command"], "left");
+    assert_eq!(result["mcpServers"]["right"]["command"], "right");
+    assert!(!state.join("journal.json").exists());
+    let bytes = fs::read(&native).unwrap();
+    let modified = fs::metadata(&native).unwrap().modified().unwrap();
+    for project in &projects {
+        succeeded(command(project).output().unwrap());
+        let ownership: Value = serde_json::from_slice(
+            &fs::read(project.join(".uniskill-cache/mcp/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ownership["entries"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(fs::read(&native).unwrap(), bytes);
+    assert_eq!(fs::metadata(native).unwrap().modified().unwrap(), modified);
+}

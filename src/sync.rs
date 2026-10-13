@@ -69,6 +69,18 @@ pub struct SyncReport {
     pub summary: SyncSummary,
 }
 
+fn lock_failure(error: anyhow::Error) -> SyncReport {
+    SyncReport {
+        events: vec![SyncEvent::StateWriteFailed {
+            error: error.to_string(),
+        }],
+        summary: SyncSummary {
+            conflicts: 1,
+            ..SyncSummary::default()
+        },
+    }
+}
+
 /// Iterate bundles and wire them into the registry.
 ///
 /// Bundles are processed in sorted order so runs are reproducible, and one
@@ -110,17 +122,7 @@ pub fn sync_with_progress(
 ) -> SyncReport {
     let _lock = match state::lock(cache_dir) {
         Ok(lock) => lock,
-        Err(error) => {
-            return SyncReport {
-                events: vec![SyncEvent::StateWriteFailed {
-                    error: error.to_string(),
-                }],
-                summary: SyncSummary {
-                    conflicts: 1,
-                    ..SyncSummary::default()
-                },
-            }
-        }
+        Err(error) => return lock_failure(error),
     };
     let previous = state::Manifest::load(state_dir);
     let mut report = SyncReport::default();
@@ -255,6 +257,10 @@ pub fn sync_worktree(
     state_dir: &Path,
     ctx: &worktree::WorktreeContext,
 ) -> SyncReport {
+    let _lock = match state::lock(cache_dir) {
+        Ok(lock) => lock,
+        Err(error) => return lock_failure(error),
+    };
     let previous = state::Manifest::load(state_dir);
     let mut report = SyncReport::default();
     let mut managed: Vec<state::ManagedLink> = Vec::new();
@@ -417,6 +423,76 @@ fn prune_orphans(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn worktree_waits_for_cache_publication_before_reading_or_pruning() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let source = temp.path().join("source");
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let state_dir = linked.join(".uniskill-cache");
+        let ctx = worktree::WorktreeContext {
+            main_root: main.clone(),
+            worktree_root: linked.clone(),
+        };
+        write_skill_dir(&source.join("skills/docs"), "docs");
+        let bundles =
+            HashMap::from([("local".into(), bundle_with_source(&source, vec!["fixture"]))]);
+        let registry = HashMap::from([(
+            "fixture".into(),
+            harnesses::HarnessDef {
+                label: "Fixture".into(),
+                pattern: Some(main.join("skills/{name}").to_string_lossy().into_owned()),
+                mcp: None,
+            },
+        )]);
+        assert!(
+            !sync_with_registry(&bundles, &registry, &cache, &cache, temp.path())
+                .summary
+                .has_failures()
+        );
+        assert!(
+            !sync_worktree(&bundles, &registry, &cache, &state_dir, &ctx)
+                .summary
+                .has_failures()
+        );
+        let manifest = fs::read(state_dir.join("state.toml")).unwrap();
+        let lock = state::lock(&cache).unwrap();
+        let published = cache.join("bundles/local");
+        let displaced = cache.join("displaced");
+        fs::rename(&published, &displaced).unwrap();
+        let (started, ready) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                started.send(()).unwrap();
+                finished
+                    .send(sync_worktree(&bundles, &registry, &cache, &state_dir, &ctx))
+                    .unwrap();
+            });
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                done.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert!(fs::symlink_metadata(linked.join("skills/docs"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read(state_dir.join("state.toml")).unwrap(), manifest);
+            fs::rename(&displaced, &published).unwrap();
+            drop(lock);
+            let report = done.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(!report.summary.has_failures());
+            assert_eq!(report.summary.pruned, 0);
+        });
+        assert!(linked.join("skills/docs/SKILL.md").exists());
+        assert_eq!(fs::read(state_dir.join("state.toml")).unwrap(), manifest);
+    }
 
     fn write_skill_dir(dir: &Path, name: &str) {
         fs::create_dir_all(dir).unwrap();

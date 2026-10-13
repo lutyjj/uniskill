@@ -127,8 +127,8 @@ A git worktree is a fresh checkout of tracked files only, so the skill symlinks
 `sync` installs into a project (`.claude/skills/`, `.agents/skills/`) never
 appear in a new worktree; every worktree starts without them. The trigger lives in git.
 
-Install a `post-checkout` hook once and every worktree created afterward; by
-Claude Code, Codex, `git worktree add`, or any tool; syncs itself:
+Install a `post-checkout` hook once. Every worktree created afterward by Claude
+Code, Codex, `git worktree add`, or another tool then syncs itself:
 
 ```bash
 # This repo only:
@@ -144,7 +144,7 @@ standard hook names so each repo's own hooks still run. It refuses to overwrite 
 `post-checkout` hook you wrote yourself.
 
 The hook runs `uniskill sync --worktree`, which links the already-assembled cache
-into the current worktree; retargeting each repo-scoped harness path onto it;
+into the current worktree and retargets each repo-scoped harness path onto it
 without refetching. Machine-global harness paths (`$HOME/.claude/skills`) are left
 alone; they are already visible from every worktree. Worktree links are tracked
 in a separate manifest, so a later `uniskill sync` in the main tree never prunes

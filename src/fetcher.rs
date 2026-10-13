@@ -367,7 +367,25 @@ pub(crate) fn fetch_git_repo(
                 .args(["cat-file", "-t", commit])
                 .output()?;
             if object.status.success() && object.stdout == b"commit\n" {
-                run_git(&repo_dir, &["reset", "--hard", "--quiet", commit])?;
+                let inspect = |args: &[&str]| {
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(&repo_dir)
+                        .env("GIT_OPTIONAL_LOCKS", "0")
+                        .args(args)
+                        .output()
+                };
+                let head = inspect(&["rev-parse", "HEAD"])?;
+                let status = inspect(&["status", "--porcelain", "--untracked-files=no"])?;
+                if !head.status.success()
+                    || !String::from_utf8_lossy(&head.stdout)
+                        .trim()
+                        .eq_ignore_ascii_case(commit)
+                    || !status.status.success()
+                    || !status.stdout.is_empty()
+                {
+                    run_git(&repo_dir, &["reset", "--hard", "--quiet", commit])?;
+                }
                 return Ok(repo_dir);
             }
         }
@@ -651,7 +669,11 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
 }
 
 pub(crate) fn cache_url(url: &str, cache: &Path) -> Result<PathBuf> {
-    let dir = cache.join("downloads").join(cache_key(url));
+    use sha2::{Digest, Sha256};
+
+    let dir = cache
+        .join("downloads")
+        .join(format!("{:x}", Sha256::digest(url.as_bytes())));
     fs::create_dir_all(&dir)?;
     let path = dir.join("SKILL.md");
     download_skill(url, &path)?;
@@ -1052,6 +1074,29 @@ mod tests {
 
     #[test]
     fn cached_immutable_commit_remains_usable_without_its_origin() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::MetadataExt;
+
+        fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, i64, i64, Vec<u8>)> {
+            let mut result = BTreeMap::new();
+            let meta = fs::symlink_metadata(root).unwrap();
+            let bytes = if meta.is_file() {
+                fs::read(root).unwrap()
+            } else {
+                Vec::new()
+            };
+            result.insert(
+                root.to_path_buf(),
+                (meta.ino(), meta.mtime(), meta.mtime_nsec(), bytes),
+            );
+            if meta.is_dir() {
+                for entry in fs::read_dir(root).unwrap() {
+                    result.extend(snapshot(&entry.unwrap().path()));
+                }
+            }
+            result
+        }
+
         let temp = tempfile::tempdir().unwrap();
         let origin = temp.path().join("origin");
         write_skill_dir(&origin, "fixture");
@@ -1066,10 +1111,60 @@ mod tests {
         let cache = temp.path().join("cache");
         let first = fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
         fs::remove_dir_all(&origin).unwrap();
+        let before = snapshot(&first);
         let second = fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
         assert_eq!(first, second);
+        assert_eq!(snapshot(&second), before);
         assert!(second.join("SKILL.md").exists());
+        let original = fs::read(second.join("SKILL.md")).unwrap();
+        fs::write(second.join("SKILL.md"), b"dirty").unwrap();
+        fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
+        assert_eq!(fs::read(second.join("SKILL.md")).unwrap(), original);
+        fs::write(second.join("SKILL.md"), b"another commit").unwrap();
+        run_git(&second, &["add", "."]).unwrap();
+        run_git(
+            &second,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "different",
+            ],
+        )
+        .unwrap();
+        fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
+        assert_eq!(fs::read(second.join("SKILL.md")).unwrap(), original);
+        let converged = snapshot(&second);
+        fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
+        assert_eq!(snapshot(&second), converged);
         assert!(fetch_git_repo(origin.to_str().unwrap(), Some("main"), &cache).is_err());
+    }
+
+    #[test]
+    fn url_cache_names_are_opaque_and_bounded_for_signed_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        for credential in [
+            "credential-marker".to_string(),
+            "credential-marker".repeat(30),
+        ] {
+            let Some(base) = serve_once("skill") else {
+                return;
+            };
+            let path = cache_url(&format!("{base}?token={credential}"), temp.path()).unwrap();
+            assert_eq!(fs::read(path).unwrap(), b"skill");
+        }
+        let names: Vec<_> = fs::read_dir(temp.path().join("downloads"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names
+            .iter()
+            .all(|name| name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())));
     }
 
     #[test]

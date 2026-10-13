@@ -264,9 +264,12 @@ impl Server {
         if let Some(options) = self.options.get(harness) {
             let options = serde_json::to_value(options)?;
             for (key, value) in options.as_object().expect("TOML table is an object") {
-                if rendered.insert(key.clone(), value.clone()).is_some() {
-                    bail!("native MCP options overlap rendered connection fields");
+                if CONNECTION_FIELDS.contains(&key.as_str())
+                    || target.fields.values().any(|field| field == key)
+                {
+                    bail!("native MCP options overlap connection fields");
                 }
+                rendered.insert(key.clone(), value.clone());
             }
         }
         Ok(Value::Object(rendered))

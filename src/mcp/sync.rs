@@ -55,6 +55,11 @@ struct Plan {
     report: Report,
 }
 
+struct LoadedState {
+    bytes: Option<Vec<u8>>,
+    owned: BTreeMap<Identity, Owned>,
+}
+
 pub fn check(
     servers: &BTreeMap<String, Server>,
     registry: &HashMap<String, HarnessDef>,
@@ -66,7 +71,13 @@ pub fn check(
     if transaction::pending(&state_dir) {
         bail!("interrupted MCP transaction; run sync to recover before checking");
     }
-    Ok(plan(servers, registry, &state_dir, worktree, adopt)?.report)
+    Ok(plan(
+        desired_entries(servers, registry, worktree)?,
+        &state_dir,
+        worktree,
+        adopt,
+    )?
+    .report)
 }
 
 pub fn sync(
@@ -77,12 +88,25 @@ pub fn sync(
     adopt: bool,
 ) -> Result<Report> {
     let state_dir = absolute_path(&state_dir.join("mcp").to_string_lossy())?;
-    if servers.is_empty() && !state_dir.exists() {
+    let desired = desired_entries(servers, registry, worktree)?;
+    if desired.is_empty() && !state_dir.exists() {
         return Ok(Report::default());
     }
     let _lock = transaction::lock(&state_dir)?;
+    let previous = load_state(&state_dir)?;
+    let mut paths: BTreeSet<PathBuf> = desired
+        .keys()
+        .chain(previous.owned.keys())
+        .map(|identity| identity.path.clone())
+        .collect();
+    for path in transaction::journal_targets(&state_dir)? {
+        if path != state_dir.join("state.json") {
+            paths.insert(absolute_path(&path.to_string_lossy())?);
+        }
+    }
+    let _destinations = transaction::lock_destinations(&paths)?;
     let preserved = transaction::recover(&state_dir)?;
-    let mut plan = plan(servers, registry, &state_dir, worktree, adopt)?;
+    let mut plan = plan(desired, &state_dir, worktree, adopt)?;
     transaction::commit(&state_dir, plan.updates)?;
     plan.report.preserved = preserved;
     Ok(plan.report)
@@ -143,42 +167,12 @@ fn fingerprint(value: &Value) -> Result<String> {
     ))
 }
 
-fn plan(
+fn desired_entries(
     servers: &BTreeMap<String, Server>,
     registry: &HashMap<String, HarnessDef>,
-    state_dir: &Path,
     worktree: Option<&WorktreeContext>,
-    adopt: bool,
-) -> Result<Plan> {
-    let state_path = state_dir.join("state.json");
-    let state_bytes = transaction::read(&state_path)?;
-    let previous: State = match &state_bytes {
-        Some(bytes) => serde_json::from_slice(bytes).map_err(|_| {
-            anyhow!("invalid MCP ownership state; refusing to change native configuration")
-        })?,
-        None => State {
-            version: 1,
-            entries: Vec::new(),
-        },
-    };
-    if previous.version != 1 || previous.entries.len() > 16384 {
-        bail!("unsupported or oversized MCP ownership state");
-    }
-    let mut owned = BTreeMap::new();
-    for entry in previous.entries {
-        if !entry.identity.path.is_absolute()
-            || entry.identity.table.is_empty()
-            || entry.digest.len() != 64
-            || !super::model::valid_name(&entry.identity.name)
-        {
-            bail!("invalid MCP ownership identity");
-        }
-        if owned.insert(entry.identity.clone(), entry).is_some() {
-            bail!("duplicate MCP ownership identity");
-        }
-    }
+) -> Result<BTreeMap<Identity, (Format, Value)>> {
     let mut desired = BTreeMap::<Identity, (Format, Value)>::new();
-    let mut namespaces = BTreeMap::new();
     for (name, server) in servers {
         if !super::model::valid_name(name) {
             bail!("invalid MCP server identity");
@@ -206,17 +200,6 @@ fn plan(
                 table: target.table.clone(),
                 name: name.clone(),
             };
-            let namespace = (
-                identity.path.clone(),
-                identity.table.clone(),
-                name.replace('-', "_"),
-            );
-            if namespaces
-                .insert(namespace, name)
-                .is_some_and(|old| old != name)
-            {
-                bail!("MCP server names collide after namespace normalization");
-            }
             let value = server
                 .render(target, harness_name)
                 .with_context(|| format!("MCP server {name} for harness {harness_name}"))?;
@@ -229,14 +212,63 @@ fn plan(
             }
         }
     }
+    Ok(desired)
+}
+
+fn load_state(state_dir: &Path) -> Result<LoadedState> {
+    let state_path = state_dir.join("state.json");
+    let state_bytes = transaction::read(&state_path)?;
+    let previous: State = match &state_bytes {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|_| {
+            anyhow!("invalid MCP ownership state; refusing to change native configuration")
+        })?,
+        None => State {
+            version: 1,
+            entries: Vec::new(),
+        },
+    };
+    if previous.version != 1 || previous.entries.len() > 16384 {
+        bail!("unsupported or oversized MCP ownership state");
+    }
+    let mut owned = BTreeMap::new();
+    for mut entry in previous.entries {
+        if !entry.identity.path.is_absolute()
+            || entry.identity.table.is_empty()
+            || entry.digest.len() != 64
+            || !super::model::valid_name(&entry.identity.name)
+        {
+            bail!("invalid MCP ownership identity");
+        }
+        entry.identity.path = absolute_path(&entry.identity.path.to_string_lossy())?;
+        if owned.insert(entry.identity.clone(), entry).is_some() {
+            bail!("duplicate MCP ownership identity");
+        }
+    }
+    Ok(LoadedState {
+        bytes: state_bytes,
+        owned,
+    })
+}
+
+fn plan(
+    desired: BTreeMap<Identity, (Format, Value)>,
+    state_dir: &Path,
+    worktree: Option<&WorktreeContext>,
+    adopt: bool,
+) -> Result<Plan> {
+    let state_path = state_dir.join("state.json");
+    let LoadedState {
+        bytes: state_bytes,
+        owned,
+    } = load_state(state_dir)?;
     let mut identities: BTreeSet<Identity> = desired.keys().cloned().collect();
     identities.extend(owned.keys().cloned());
-    let mut tables = BTreeMap::<&Path, BTreeSet<&Vec<String>>>::new();
+    let mut tables = BTreeMap::<PathBuf, BTreeSet<Vec<String>>>::new();
     for identity in &identities {
         tables
-            .entry(&identity.path)
+            .entry(identity.path.clone())
             .or_default()
-            .insert(&identity.table);
+            .insert(identity.table.clone());
     }
     for tables in tables.values() {
         let tables: Vec<_> = tables.iter().collect();
@@ -303,6 +335,17 @@ fn plan(
             target: identity.path,
             status,
         });
+    }
+    for (path, table_paths) in tables {
+        let document = &documents[&path].2;
+        for table in table_paths {
+            let mut namespaces = BTreeSet::new();
+            for name in document.names(&table)? {
+                if !namespaces.insert(name.replace('-', "_")) {
+                    bail!("MCP server names collide after namespace normalization");
+                }
+            }
+        }
     }
     let mut updates = Vec::new();
     for (path, (_, before, document, changed)) in documents {

@@ -1,6 +1,6 @@
 ---
 name: uniskill-dev
-description: Workflow and conventions for developing uniskill, the skill bundle wiring tool. Covers build, test, feature flow, and project architecture.
+description: Workflow and conventions for developing uniskill, the skills and MCP configuration CLI. Covers build, test, feature flow, and project architecture.
 ---
 
 # uniskill development

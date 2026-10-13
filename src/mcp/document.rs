@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use anyhow::{anyhow, bail, Result};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table};
@@ -34,13 +36,18 @@ impl Document {
         }
     }
 
-    pub fn get(&self, keys: &[String], name: &str) -> Result<Option<Value>> {
-        let root = match self {
-            Self::Json(value) => value.clone(),
-            Self::Toml(document) => toml_edit::de::from_document::<Value>(document.clone())
-                .map_err(|_| anyhow!("cannot read native TOML server definitions"))?,
-        };
-        let mut node = &root;
+    fn root(&self) -> Result<Cow<'_, Value>> {
+        Ok(match self {
+            Self::Json(value) => Cow::Borrowed(value),
+            Self::Toml(document) => Cow::Owned(
+                toml_edit::de::from_document::<Value>(document.clone())
+                    .map_err(|_| anyhow!("cannot read native TOML server definitions"))?,
+            ),
+        })
+    }
+
+    fn collection<'a>(root: &'a Value, keys: &[String]) -> Result<Option<&'a Map<String, Value>>> {
+        let mut node = root;
         for key in keys {
             let table = node
                 .as_object()
@@ -50,9 +57,23 @@ impl Document {
                 None => return Ok(None),
             }
         }
-        let table = node
-            .as_object()
-            .ok_or_else(|| anyhow!("native MCP server collection must be an object"))?;
+        Ok(Some(node.as_object().ok_or_else(|| {
+            anyhow!("native MCP server collection must be an object")
+        })?))
+    }
+
+    pub fn names(&self, keys: &[String]) -> Result<Vec<String>> {
+        let root = self.root()?;
+        Ok(Self::collection(&root, keys)?
+            .map(|table| table.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    pub fn get(&self, keys: &[String], name: &str) -> Result<Option<Value>> {
+        let root = self.root()?;
+        let Some(table) = Self::collection(&root, keys)? else {
+            return Ok(None);
+        };
         if table.get(name).is_some_and(|v| !v.is_object()) {
             bail!("native MCP server entry must be an object");
         }
