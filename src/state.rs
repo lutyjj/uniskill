@@ -1,8 +1,22 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+pub fn lock(cache_dir: &Path) -> Result<File> {
+    fs::create_dir_all(cache_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(cache_dir.join("sync.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
 
 /// One symlink uniskill created, and therefore owns and may prune.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +56,9 @@ impl Manifest {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let body = toml::to_string(self).context("failed to serialize uniskill state")?;
+        if fs::read(&path).ok().as_deref() == Some(body.as_bytes()) {
+            return Ok(());
+        }
         fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
     }
 

@@ -45,7 +45,7 @@ url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/s
 ```
 
 Because a local `source` links straight to the working tree, editing
-`~/.agents/skills/code-design/SKILL.md` edits `agent-skills/bundles/generic/skills/code-design/SKILL.md`
+`~/.agents/skills/code-architecture/SKILL.md` edits `agent-skills/bundles/generic/skills/code-architecture/SKILL.md`
 directly. `git pull` is live in every harness; you only re-run `sync` when a
 skill is added or removed. When changes are ready, commit and push from the repo.
 `caveman` stays a copied `url` skill because only local sources link.
@@ -102,10 +102,10 @@ pattern = ".agents/skills/{name}"
 [bundles.generic]
 harnesses = ["local-agent"]
 
-[bundles.generic.skills.code-design]
+[bundles.generic.skills.code-architecture]
 repo = "gh:lutyjj/agent-skills"
 ref = "main"
-path = "bundles/generic/skills/code-design"
+path = "bundles/generic/skills/code-architecture"
 ```
 
 The project receives the selected global skills without touching global agent
@@ -122,8 +122,8 @@ pattern = "/opt/claude/skills/{name}"
 [bundles.generic]
 harnesses = ["claude-code"]
 
-[bundles.generic.skills.code-design]
-source = "$HOME/workplace/agent-skills/bundles/generic/skills/code-design"
+[bundles.generic.skills.code-architecture]
+source = "$HOME/workplace/agent-skills/bundles/generic/skills/code-architecture"
 ```
 
 User-defined harnesses override built-in harnesses with the same name.
@@ -136,10 +136,10 @@ User-defined harnesses override built-in harnesses with the same name.
 [bundles.generic]
 harnesses = ["pi"]
 
-[bundles.generic.skills.code-design]
+[bundles.generic.skills.code-architecture]
 repo = "gh:lutyjj/agent-skills"
 ref = "main"
-path = "bundles/generic/skills/code-design"
+path = "bundles/generic/skills/code-architecture"
 
 [bundles.generic.skills.caveman]
 url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
@@ -150,3 +150,29 @@ source = "./skills/local-experiment"
 
 The bundle remains the policy layer. Individual skill entries retain full source
 control.
+
+## Journey 7: One private MCP catalog for several agents
+
+**Goal**: Keep service definitions in a private local file while reusing a
+versioned skills config.
+
+```toml
+# ~/.config/uniskill/config.toml
+includes = ["skills.toml", "mcp-private.toml"]
+```
+
+```toml
+# ~/.config/uniskill/mcp-private.toml
+[mcp.docs]
+harnesses = ["pi", "claude-code", "codex"]
+url = "https://example.com/mcp"
+bearer_token_env_var = "DOCS_TOKEN"
+
+[mcp.docs.options.pi]
+exposure = "direct"
+```
+
+Run `uniskill sync --check-mcp` to inspect whether MCP changes are pending,
+then `uniskill sync`. Matching existing entries require `--adopt-mcp` once.
+Keep private files outside Git. See [MCP.md](MCP.md) for ownership conflicts,
+reference handling, and native config precedence.

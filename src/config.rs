@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ use serde::Deserialize;
 ///   `skills/` folder), pulled as a unit — point at a bundle and be done;
 /// - explicit per-skill entries under `[bundles.<name>.skills.<skill>]`, which
 ///   add to, or override by name, whatever the bundle source provided.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Bundle {
     /// Which harnesses to wire this bundle into.
     pub harnesses: Vec<String>,
@@ -145,6 +145,12 @@ impl SourceSpec {
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub includes: Vec<String>,
+
+    #[serde(default)]
+    pub mcp: BTreeMap<String, crate::mcp::Server>,
+
     /// Bundle definitions keyed by bundle name.
     #[serde(default)]
     pub bundles: HashMap<String, Bundle>,
@@ -161,36 +167,16 @@ pub struct Harness {
 
     /// Pattern like "$HOME/.agents/skills/{name}"
     /// {name} is replaced with skill name at runtime
-    pub pattern: String,
-}
-
-/// Project-local harness (relative to project root).
-#[derive(Debug, Deserialize)]
-pub struct LocalHarness {
-    /// Human-readable display name (defaults to harness key)
     #[serde(default)]
-    pub label: Option<String>,
+    pub pattern: Option<String>,
 
-    /// Relative pattern like ".claude/skills/{name}"
-    pub pattern: String,
-}
-
-/// Minimal config for project-level `uniskill.toml`.
-#[derive(Debug, Deserialize)]
-pub struct ProjectConfig {
-    /// Bundle definitions keyed by bundle name.
     #[serde(default)]
-    pub bundles: HashMap<String, Bundle>,
-
-    /// Local harness definitions with relative patterns;
-    /// deserialises from the `[harnesses.XXX]` TOML key to match DESIGN.md.
-    #[serde(default, rename = "harnesses")]
-    pub project_harnesses: HashMap<String, LocalHarness>,
+    pub mcp: Option<crate::mcp::Target>,
 }
 
 #[derive(Debug)]
 pub struct ProjectConfigFile {
-    pub config: ProjectConfig,
+    pub config: Config,
     pub path: PathBuf,
 }
 
@@ -220,7 +206,11 @@ pub fn expand_env_vars(s: &str) -> String {
                 }
 
                 if closed {
-                    if let Ok(value) = env::var(&var_name) {
+                    if let Some((name, fallback)) = var_name.split_once(":-") {
+                        result.push_str(
+                            &env::var(name).unwrap_or_else(|_| expand_env_vars(fallback)),
+                        );
+                    } else if let Ok(value) = env::var(&var_name) {
                         result.push_str(&value);
                     } else {
                         result.push_str("${");
@@ -260,30 +250,113 @@ pub fn expand_env_vars(s: &str) -> String {
 
 /// Parse config from a file path. Falls back to default config path if none given.
 pub fn parse_config<P: AsRef<Path>>(path: P) -> crate::error::Result<Config> {
-    let path = path.as_ref();
+    load_config(path.as_ref(), &mut BTreeSet::new(), 0)
+}
+
+fn load_config(
+    path: &Path,
+    seen: &mut BTreeSet<PathBuf>,
+    depth: usize,
+) -> crate::error::Result<Config> {
+    use crate::error::AppError;
     if !path.exists() {
         return Err(crate::error::AppError::ConfigNotFound(
             path.to_string_lossy().to_string(),
         ));
     }
 
-    let content = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&content).map_err(crate::error::AppError::ConfigParse)?;
+    let real = path.canonicalize()?;
+    if depth > 8 || seen.len() >= 32 || !seen.insert(real.clone()) {
+        return Err(AppError::InvalidConfig(
+            "config includes must be acyclic and contain at most 32 files and 8 levels".into(),
+        ));
+    }
+    if std::fs::metadata(&real)?.len() > 8 * 1024 * 1024 {
+        return Err(AppError::InvalidConfig("config exceeds 8 MiB".into()));
+    }
+    let content = std::fs::read_to_string(&real)?;
+    if content.len() > 8 * 1024 * 1024 {
+        return Err(AppError::InvalidConfig("config exceeds 8 MiB".into()));
+    }
+    let mut config: Config = toml::from_str(&content)
+        .map_err(|_| AppError::InvalidConfig(format!("cannot parse config {}", real.display())))?;
+    let base = real.parent().expect("canonical file has a parent");
+    anchor_paths(&mut config, base);
+    for include in config.includes.clone() {
+        let child_path = resolve_source_from(&include, base);
+        let child = load_config(&child_path, seen, depth + 1)?;
+        for (name, bundle) in child.bundles {
+            if config.bundles.insert(name, bundle).is_some() {
+                return Err(AppError::InvalidConfig(
+                    "duplicate bundle across config includes".into(),
+                ));
+            }
+        }
+        for (name, harness) in child.harnesses {
+            if config.harnesses.insert(name, harness).is_some() {
+                return Err(AppError::InvalidConfig(
+                    "duplicate harness across config includes".into(),
+                ));
+            }
+        }
+        for (name, server) in child.mcp {
+            if config.mcp.insert(name, server).is_some() {
+                return Err(AppError::InvalidConfig(
+                    "duplicate MCP server across config includes".into(),
+                ));
+            }
+        }
+    }
+    if config.mcp.len() > 1024 {
+        return Err(AppError::InvalidConfig(
+            "config contains more than 1024 MCP servers".into(),
+        ));
+    }
+    for (name, server) in &config.mcp {
+        if !crate::mcp::model::valid_name(name) {
+            return Err(AppError::InvalidConfig(
+                "invalid MCP server identity".into(),
+            ));
+        }
+        server
+            .validate()
+            .map_err(|e| AppError::InvalidConfig(format!("MCP server {name}: {e}")))?;
+    }
+    for harness in config.harnesses.values() {
+        if let Some(target) = &harness.mcp {
+            target
+                .validate()
+                .map_err(|e| AppError::InvalidConfig(e.to_string()))?;
+        }
+    }
     Ok(config)
 }
 
-pub fn parse_project_config<P: AsRef<Path>>(path: P) -> crate::error::Result<ProjectConfig> {
-    let path = path.as_ref();
-    if !path.exists() {
-        return Err(crate::error::AppError::ConfigNotFound(
-            path.to_string_lossy().to_string(),
-        ));
+fn anchor_paths(config: &mut Config, base: &Path) {
+    for harness in config.harnesses.values_mut() {
+        if let Some(pattern) = &mut harness.pattern {
+            *pattern = resolve_source_from(pattern, base)
+                .to_string_lossy()
+                .into_owned();
+        }
+        if let Some(target) = &mut harness.mcp {
+            target.path = resolve_source_from(&target.path, base)
+                .to_string_lossy()
+                .into_owned();
+        }
     }
-
-    let content = std::fs::read_to_string(path)?;
-    let config: ProjectConfig =
-        toml::from_str(&content).map_err(crate::error::AppError::ConfigParse)?;
-    Ok(config)
+    for bundle in config.bundles.values_mut() {
+        for source in std::iter::once(&mut bundle.source).chain(bundle.skills.values_mut()) {
+            if let Some(path) = &mut source.source {
+                *path = resolve_source_from(path, base)
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            if let Some(repo) = &mut source.repo {
+                *repo = resolve_repo_from(repo, base);
+            }
+        }
+    }
 }
 
 /// Discover a project-local config (`uniskill.toml`) in the current directory.
@@ -293,7 +366,7 @@ pub fn discover_project_config() -> crate::error::Result<Option<ProjectConfigFil
         return Ok(None);
     }
 
-    let config = parse_project_config(&candidate)?;
+    let config = parse_config(&candidate)?;
     Ok(Some(ProjectConfigFile {
         config,
         path: candidate,
@@ -422,8 +495,8 @@ pattern = "/custom/path/skills/{name}"
         // Only user-defined harnesses are in the parsed map; defaults merge in cli::sync
         assert!(config.harnesses.contains_key("my-harness"));
         assert_eq!(
-            config.harnesses["my-harness"].pattern,
-            "/custom/path/skills/{name}"
+            config.harnesses["my-harness"].pattern.as_deref(),
+            Some("/custom/path/skills/{name}")
         );
     }
 
@@ -467,7 +540,10 @@ pattern = "/opt/custom/skills/{name}"
         let config = parse_config(file.path()).unwrap();
         let harness = config.harnesses.get("custom").unwrap();
         assert_eq!(harness.label, Some("My Custom Agent".to_string()));
-        assert_eq!(harness.pattern, "/opt/custom/skills/{name}");
+        assert_eq!(
+            harness.pattern.as_deref(),
+            Some("/opt/custom/skills/{name}")
+        );
     }
 
     #[test]
@@ -526,8 +602,7 @@ pattern = "/opt/custom/skills/{name}"
 
     #[test]
     fn test_project_config_with_harnesses_key() {
-        // Project-level TOML uses [harnesses.XXX] which deserialises into
-        // project_harnesses via serde rename.
+        // Global and project files share the same config shape.
         let content = r#"
 [bundles.local-skills]
 harnesses = ["local-agent"]
@@ -541,24 +616,24 @@ pattern = ".agents/skills/{name}"
 "#;
         let file = write_temp_toml(content);
         let content_bytes = std::fs::read_to_string(file.path()).unwrap();
-        // Deserialize as ProjectConfig directly
-        let config: ProjectConfig = toml::from_str(&content_bytes).unwrap();
+        // Deserialize the unresolved wire shape directly.
+        let config: Config = toml::from_str(&content_bytes).unwrap();
         assert_eq!(config.bundles.len(), 1);
         let bundle = config.bundles.get("local-skills").unwrap();
         assert_eq!(
             bundle.skills["example"].source.as_deref(),
             Some("./my-skills/example")
         );
-        assert!(!config.project_harnesses.is_empty());
-        let harness = config.project_harnesses.get("local-agent").unwrap();
+        assert!(!config.harnesses.is_empty());
+        let harness = config.harnesses.get("local-agent").unwrap();
         assert_eq!(harness.label, Some("Local Agent".to_string()));
-        assert_eq!(harness.pattern, ".agents/skills/{name}");
+        assert_eq!(harness.pattern.as_deref(), Some(".agents/skills/{name}"));
     }
 
     #[test]
     fn test_parse_project_config_reports_invalid_toml() {
         let file = write_temp_toml("[bundles");
-        let result = parse_project_config(file.path());
+        let result = parse_config(file.path());
         assert!(result.is_err());
     }
 

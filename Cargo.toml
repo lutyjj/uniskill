@@ -1,8 +1,8 @@
 [package]
 name = "uniskill"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
-description = "Wire skill bundles from one source into multiple agent harnesses"
+description = "Sync skills and MCP definitions into configurable agent harnesses"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -12,7 +12,10 @@ dirs = "6"
 thiserror = "2"
 anyhow = "1"
 ureq = { version = "2", default-features = false, features = ["tls"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+toml_edit = { version = "0.22", features = ["serde"] }
+sha2 = "0.10"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tiny_http = "0.12"

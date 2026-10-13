@@ -79,6 +79,7 @@ pub struct SyncReport {
 /// pruning; `state_dir` is where this sync's manifest lives. They are the same
 /// directory for a normal sync, and differ for a worktree sync so that main and
 /// worktree runs never prune each other's links.
+#[cfg(test)]
 pub fn sync_with_registry(
     bundles: &HashMap<String, config::Bundle>,
     registry: &HashMap<String, harnesses::HarnessDef>,
@@ -86,6 +87,41 @@ pub fn sync_with_registry(
     state_dir: &Path,
     source_base_dir: &Path,
 ) -> SyncReport {
+    sync_with_progress(
+        bundles,
+        registry,
+        cache_dir,
+        state_dir,
+        source_base_dir,
+        4,
+        &mut |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sync_with_progress(
+    bundles: &HashMap<String, config::Bundle>,
+    registry: &HashMap<String, harnesses::HarnessDef>,
+    cache_dir: &Path,
+    state_dir: &Path,
+    source_base_dir: &Path,
+    jobs: usize,
+    progress: &mut impl FnMut(crate::fetch_plan::Progress),
+) -> SyncReport {
+    let _lock = match state::lock(cache_dir) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return SyncReport {
+                events: vec![SyncEvent::StateWriteFailed {
+                    error: error.to_string(),
+                }],
+                summary: SyncSummary {
+                    conflicts: 1,
+                    ..SyncSummary::default()
+                },
+            }
+        }
+    };
     let previous = state::Manifest::load(state_dir);
     let mut report = SyncReport::default();
 
@@ -94,6 +130,21 @@ pub fn sync_with_registry(
 
     let mut bundle_names: Vec<&String> = bundles.keys().collect();
     bundle_names.sort();
+
+    let eligible: HashMap<String, config::Bundle> = bundles
+        .iter()
+        .filter(|(_, bundle)| {
+            !bundle.harnesses.is_empty()
+                && bundle
+                    .harnesses
+                    .iter()
+                    .all(|name| registry.get(name).is_some_and(|h| h.pattern.is_some()))
+                && fetcher::validate_bundle(bundle).is_ok()
+        })
+        .map(|(name, bundle)| (name.clone(), bundle.clone()))
+        .collect();
+    let prepared =
+        crate::fetch_plan::prepare(&eligible, cache_dir, source_base_dir, jobs, progress);
 
     for bundle_name in bundle_names {
         let bundle = &bundles[bundle_name];
@@ -110,8 +161,10 @@ pub fn sync_with_registry(
         let mut missing_harness = false;
         for harness_name in &bundle.harnesses {
             match registry.get(harness_name) {
-                Some(harness) => resolved_harnesses.push((harness_name, harness)),
-                None => {
+                Some(harness) if harness.pattern.is_some() => {
+                    resolved_harnesses.push((harness_name, harness))
+                }
+                Some(_) | None => {
                     report.events.push(SyncEvent::UnknownHarness {
                         bundle: bundle_name.clone(),
                         harness: harness_name.clone(),
@@ -126,8 +179,16 @@ pub fn sync_with_registry(
             continue;
         }
 
-        let source = match fetcher::assemble_bundle(bundle_name, bundle, cache_dir, source_base_dir)
-        {
+        progress(crate::fetch_plan::Progress::Assembling {
+            bundle: bundle_name.clone(),
+        });
+        let source = match fetcher::assemble_bundle_prepared(
+            bundle_name,
+            bundle,
+            cache_dir,
+            source_base_dir,
+            Some(&prepared),
+        ) {
             Ok(source) => source,
             Err(err) => {
                 report.events.push(SyncEvent::BundleFailed {
@@ -140,8 +201,17 @@ pub fn sync_with_registry(
             }
         };
 
+        progress(crate::fetch_plan::Progress::Linking {
+            bundle: bundle_name.clone(),
+        });
         for (harness_name, harness) in resolved_harnesses {
-            let mut results = linker::sync_bundle(&source, &harness.pattern);
+            let mut results = linker::sync_bundle(
+                &source,
+                harness
+                    .pattern
+                    .as_deref()
+                    .expect("skill target was validated"),
+            );
             results.sort_by(|a, b| a.skill_name.cmp(&b.skill_name));
 
             for result in results {
@@ -210,7 +280,10 @@ pub fn sync_worktree(
             let Some(harness) = registry.get(harness_name) else {
                 continue;
             };
-            let expanded = config::expand_env_vars(&harness.pattern);
+            let Some(pattern) = &harness.pattern else {
+                continue;
+            };
+            let expanded = config::expand_env_vars(pattern);
             let Some(retargeted) = ctx.retarget(&expanded) else {
                 // Global or other-repo harness — not owned by this worktree.
                 continue;
@@ -380,12 +453,14 @@ mod tests {
             "agents".to_string(),
             harnesses::HarnessDef {
                 label: "Local Agents".to_string(),
-                pattern: tmp
-                    .path()
-                    .join("harness")
-                    .join("{name}")
-                    .to_string_lossy()
-                    .to_string(),
+                mcp: None,
+                pattern: Some(
+                    tmp.path()
+                        .join("harness")
+                        .join("{name}")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
             },
         );
 

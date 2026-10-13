@@ -1,6 +1,6 @@
 # uniskill
 
-Wire named skill groups into multiple agent harnesses. A bundle is a routing
+Sync reusable skills and MCP server definitions into agent harnesses. A bundle is a routing
 layer: it names a set of skills and says which harnesses receive them. A bundle
 can be pulled whole from a remote, composed from individual skills, or both.
 
@@ -8,8 +8,12 @@ can be pulled whole from a remote, composed from individual skills, or both.
 
 uniskill reads a config file, assembles each declared bundle into a local cache,
 and creates symlinks at every target harness path. A single bundle can install to
-the Pi harness (`~/.agents/skills/`), Claude Code (`~/.claude/skills/`), or any
-custom harness you define.
+Pi, Claude Code, Codex, or any custom harness you define.
+
+MCP definitions use the same routing model. Each server chooses harnesses; each
+harness declares a native file, format, table path, and field mappings. Sync
+edits only managed server entries and preserves unrelated settings. See the
+[MCP reference](docs/MCP.md) for configuration, adoption, and recovery.
 
 A bundle draws skills from two composable layers:
 
@@ -33,13 +37,14 @@ always copied.
 
 `sync` is deterministic and conservative. Bundles are processed in sorted order.
 A bundle that fails to build is reported and skipped. Links from a previous sync
-that are no longer in the config are pruned. Only uniskill-owned symlinks are
+absent from the config are pruned. Only uniskill-owned symlinks are
 removed; hand-placed files are left alone.
 
 ## What it does not do
 
-uniskill does not publish skills, handle semver dependency solving, or modify
-harness configuration beyond creating and updating symlinks.
+uniskill reads text sources and writes links or configuration. It does not run
+MCP commands, install MCP packages, connect to servers, or manage OAuth tokens.
+Skill publishing and dependency solving belong to their source tools.
 
 ## Quick start
 
@@ -81,10 +86,10 @@ Create a global config at `~/.config/uniskill/config.toml`:
 [bundles.generic]
 harnesses = ["pi", "claude-code"]
 
-[bundles.generic.skills.code-design]
+[bundles.generic.skills.code-architecture]
 repo = "gh:lutyjj/agent-skills"
 ref = "main"
-path = "bundles/generic/skills/code-design"
+path = "bundles/generic/skills/code-architecture"
 
 [bundles.generic.skills.caveman]
 url = "https://raw.githubusercontent.com/JuliusBrussee/caveman/refs/heads/main/skills/caveman/SKILL.md"
@@ -109,18 +114,21 @@ source = "./skills/release-helper"
 uniskill sync
 ```
 
-Running `sync` twice reports "ok" for every already-correct skill. Exit code 1
-indicates conflicts or broken symlinks.
+Running `sync` twice reports "ok" for already-correct entries and preserves
+applied file contents, symlinks, bundle caches, manifests, and modification
+times. Mutable remote sources are checked for updates. Distinct downloads run
+concurrently (default four); `sync --jobs 1` fetches serially. Progress shows the
+plan, remote job durations, and assembly/link stages. Cached full commit IDs
+require no network fetch. Exit code 1 indicates a failed sync.
 
 ## Git worktrees
 
 A git worktree is a fresh checkout of tracked files only, so the skill symlinks
 `sync` installs into a project (`.claude/skills/`, `.agents/skills/`) never
-appear in a new worktree — every worktree starts without them. Because this is a
-git-level fact, no single-harness fix covers it; the trigger lives in git.
+appear in a new worktree; every worktree starts without them. The trigger lives in git.
 
-Install a `post-checkout` hook once and every worktree created afterward — by
-Claude Code, Codex, `git worktree add`, or any tool — syncs itself:
+Install a `post-checkout` hook once and every worktree created afterward; by
+Claude Code, Codex, `git worktree add`, or any tool; syncs itself:
 
 ```bash
 # This repo only:
@@ -136,7 +144,7 @@ standard hook names so each repo's own hooks still run. It refuses to overwrite 
 `post-checkout` hook you wrote yourself.
 
 The hook runs `uniskill sync --worktree`, which links the already-assembled cache
-into the current worktree — retargeting each repo-scoped harness path onto it —
+into the current worktree; retargeting each repo-scoped harness path onto it;
 without refetching. Machine-global harness paths (`$HOME/.claude/skills`) are left
 alone; they are already visible from every worktree. Worktree links are tracked
 in a separate manifest, so a later `uniskill sync` in the main tree never prunes
@@ -180,6 +188,9 @@ provided.
 | `bundles.<bundle>.skills.<skill>.path` | string | Optional skill path inside `repo` |
 | `harnesses.<name>.pattern` | string | Target pattern containing `{name}` |
 | `harnesses.<name>.label` | string | Optional display label |
+| `includes` | array of strings | Additional config files, resolved at the declaring file |
+| `harnesses.<name>.mcp` | table | Native MCP destination; see [MCP reference](docs/MCP.md) |
+| `mcp.<server>` | table | Shared MCP server definition and destinations |
 
 Each skill must declare exactly one source kind: `source`, `url`, or `repo`.
 Git-backed skills use the repository root when `path` is omitted. `ref` and
@@ -200,15 +211,15 @@ override built-ins with the same name.
 
 ## Environment variables
 
-Paths support `$VAR` and `${VAR}` expansion. Unresolvable variables are left
-unchanged, so use variables that exist on every target machine.
+Paths support `$VAR`, `${VAR}`, and `${VAR:-fallback}` expansion. Fallbacks may
+contain `$VAR` references, but nested braces are unsupported. Unresolved MCP
+target variables are rejected; use variables available on the target machine.
 
 ## Built-in harnesses
 
-| Name | Pattern | Scope |
-|------|---------|-------|
-| `pi` | `$HOME/.agents/skills/{name}` | global |
-| `claude-code` | `$HOME/.claude/skills/{name}` | global |
+`pi`, `claude-code`, and `codex` provide skill and MCP destinations. Their paths
+and native formats live in [src/harnesses.toml](src/harnesses.toml). Config can
+override either destination while retaining the other.
 
 ## Release process
 
@@ -227,13 +238,14 @@ publishes raw binaries, tarballs, and `checksums-sha256.txt`.
 
 ## Sync behavior
 
-- **Idempotent**: existing symlinks report "ok" on re-run
+- **Idempotent**: converged skills, native MCP files, and ownership state stay unchanged
 - **Updated**: symlink replaced because it points to the wrong source or is broken
 - **Conflict**: a non-symlink file or directory exists at the target, so the
   skill is skipped
-- Unmanaged symlinks remain untouched
+- Unmanaged symlinks remain untouched unless a declared skill target requires replacement
 
 ## Design docs
 
 - [Design overview](docs/DESIGN.md)
 - [User journeys](docs/USER_JOURNEY.md)
+- [MCP configuration and ownership](docs/MCP.md)

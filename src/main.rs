@@ -1,10 +1,12 @@
 mod cli;
 mod config;
 mod error;
+mod fetch_plan;
 mod fetcher;
 mod harnesses;
 mod hook;
 mod linker;
+mod mcp;
 mod skill;
 mod state;
 mod sync;

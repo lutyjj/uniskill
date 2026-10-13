@@ -6,7 +6,7 @@ pub enum AppError {
     ConfigNotFound(String),
 
     #[error("invalid config: {0}")]
-    ConfigParse(#[from] toml::de::Error),
+    InvalidConfig(String),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

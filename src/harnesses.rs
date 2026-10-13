@@ -9,30 +9,14 @@ pub struct HarnessDef {
     pub label: String,
 
     /// Pattern with {name} placeholder and $VAR references
-    pub pattern: String,
+    pub pattern: Option<String>,
+
+    pub mcp: Option<crate::mcp::Target>,
 }
 
 /// Built-in harness registry. Users can extend or override via config.
 pub fn default_harnesses() -> HashMap<String, HarnessDef> {
-    let mut map = HashMap::new();
-
-    map.insert(
-        "pi".to_string(),
-        HarnessDef {
-            label: "Pi".to_string(),
-            pattern: "$HOME/.agents/skills/{name}".to_string(),
-        },
-    );
-
-    map.insert(
-        "claude-code".to_string(),
-        HarnessDef {
-            label: "Claude Code".to_string(),
-            pattern: "$HOME/.claude/skills/{name}".to_string(),
-        },
-    );
-
-    map
+    toml::from_str(include_str!("harnesses.toml")).expect("built-in harness definitions are valid")
 }
 
 #[cfg(test)]
@@ -53,7 +37,8 @@ mod tests {
             "pi".to_string(),
             HarnessDef {
                 label: "Pi (custom)".to_string(),
-                pattern: "/custom/agents/skills/{name}".to_string(),
+                pattern: Some("/custom/agents/skills/{name}".to_string()),
+                mcp: None,
             },
         );
         let pi = registry.get("pi");

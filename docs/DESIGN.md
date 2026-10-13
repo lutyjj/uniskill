@@ -1,16 +1,16 @@
 # Design - uniskill
 
-uniskill wires named groups of skills into agent harnesses by symlinking from an
-assembled cache. The config is explicit: bundles choose destinations, and skills
-choose sources.
+uniskill routes skills and MCP definitions into configurable agent harnesses.
+Bundles choose skill destinations and sources; MCP servers choose native
+configuration destinations. Harness identities never select engine behavior.
 
 > See [USER_JOURNEY.md](USER_JOURNEY.md) for concrete global, project-level, and
 > custom harness workflows.
 
 ## Scope
 
-uniskill manages skill installation paths. It does not publish skills, solve
-versions, infer a repository layout, or edit harness configuration files.
+uniskill manages skill links and owned MCP entries. Native configuration
+contracts, ownership, and recovery are documented in [MCP.md](MCP.md).
 
 ## Core model
 
@@ -74,10 +74,10 @@ to the repository root.
 A skill entry is keyed by the installed skill name and carries one source:
 
 ```toml
-[bundles.generic.skills.code-design]
+[bundles.generic.skills.code-architecture]
 repo = "gh:lutyjj/agent-skills"
 ref = "main"
-path = "bundles/generic/skills/code-design"
+path = "bundles/generic/skills/code-architecture"
 ```
 
 ## Source types
@@ -146,20 +146,14 @@ pattern = "$HOME/.company-agent/skills/{name}"
 `{name}` is replaced with the skill key. Built-in harnesses are loaded first and
 user config can override them.
 
-Built-ins:
-
-| Name | Pattern |
-|------|---------|
-| `pi` | `$HOME/.agents/skills/{name}` |
-| `claude-code` | `$HOME/.claude/skills/{name}` |
+[src/harnesses.toml](../src/harnesses.toml) owns the built-in destinations.
+Custom harnesses may provide a skill pattern, an MCP target, or both.
 
 ## Git worktrees
 
 A linked git worktree is a fresh checkout of tracked files only. The skill
 symlinks `sync` installs live in ignored directories (`.agents/`,
-`.claude/skills/`), so they never appear in a new worktree. The link *kind* is
-irrelevant — nothing untracked is reproduced — so the fix cannot be a different
-symlink or a per-harness trigger. The one harness-agnostic trigger is git's own
+`.claude/skills/`), so they never appear in a new worktree. The trigger is git's own
 `post-checkout` hook, which fires in the new worktree on `git worktree add` (and
 clone) whatever tool ran it.
 
@@ -171,7 +165,7 @@ none are shadowed. The hook runs `uniskill sync --worktree`.
 current worktree. It resolves the same bundles and harnesses, then for each
 harness whose target lies inside the repository's main worktree it rewrites that
 prefix onto the worktree root (`worktree.rs`). Harnesses outside the main
-worktree — a machine-global path, or another repo — are skipped, since a global
+worktree; a machine-global path, or another repo; are skipped, since a global
 skills directory is already visible from every worktree. It never fetches, which
 keeps the hook fast and offline-safe; a bundle the main sync has not assembled
 yet is reported and skipped.
@@ -185,32 +179,33 @@ Relative paths resolve against the config that declared them:
 
 - `source` for local skills
 - local `repo` values such as `../agent-skills`
-- project harness patterns such as `.agents/skills/{name}`
+- harness patterns such as `.agents/skills/{name}`
+- native MCP file paths
+- included config files
 
-Environment variables use `$VAR` and `${VAR}` syntax. Unresolvable variables are
-left unchanged.
+Included files share the global/project shape and retain their own path bases.
+Duplicate bundle, harness, or server identities across includes are rejected.
+See [README.md](../README.md#environment-variables) for variable expansion.
 
 ## Data flow
 
-1. Load built-in harnesses.
-2. Load config and merge custom harnesses.
-3. Load the previous run's link manifest.
-4. For each bundle **in sorted order**, validate its harnesses before changing
-   the bundle cache. A bundle with an unknown harness is reported and skipped.
-5. Assemble the bundle in a staging directory. If assembly fails, keep the
-   previous bundle cache and preserve its manifest entries.
-6. If the bundle has a whole-bundle source, place every skill under its `skills/`
-   folder into the staged bundle. Local sources are symlinked when `link = true`
-   and copied otherwise.
-7. For each explicit skill entry, place its source into the staged bundle
-   (clearing any same-named skill first), adding to or overriding the
-   whole-bundle skills by name.
-8. Promote the staged bundle cache over the previous bundle cache only after
-   assembly succeeds.
-9. For each bundle-harness pair, create or update symlinks to cached skills,
-   recording each in the new manifest.
-10. Prune: remove any link from the previous manifest that was not installed
-   this run, then write the new manifest.
+1. Load the built-in destination registry and resolve the config/includes.
+2. Validate and reconcile MCP entries as a separate journaled transaction.
+3. Lock the skill cache and load the previous link manifest.
+4. Validate bundle sources and skill destinations before downloading.
+5. Deduplicate remote sources and fetch them with bounded concurrency. Jobs
+   report durations; failed jobs retain each affected bundle's prior cache.
+6. Assemble bundles in sorted order. Local sources link live or copy according
+   to `link`; explicit skills override whole-bundle entries by name.
+7. Compare the staged tree with the published cache. Identical trees retain
+   their files and metadata; changed trees replace the cache after successful
+   assembly.
+8. Reconcile harness symlinks, preserve failed bundles' ownership, and prune
+   recorded links that still point into the cache.
+9. Write the link manifest only when its bytes change.
+
+Skill and MCP operations have separate ownership and failure boundaries. A
+skill fetch failure does not roll back a completed MCP transaction.
 
 For a linked local source the harness symlink resolves through the cache entry
 to the working tree, so the cache is an index of live links rather than copies.
@@ -218,7 +213,7 @@ to the working tree, so the cache is an index of live links rather than copies.
 ## State and pruning
 
 uniskill records every link it installs in `state.toml` next to the assembled
-bundles. On the next sync it removes links that are no longer declared, such as
+bundles. On the next sync it removes links absent from the config, such as
 a skill dropped from a bundle or a whole bundle removed from the config. Config is
 the source of truth for what stays installed.
 
@@ -227,19 +222,20 @@ symlink pointing into uniskill's own cache, so hand-placed directories and
 foreign symlinks in a harness are never touched. A link whose bundle failed to
 build this run is kept, not pruned: a build error is a failure, not a removal.
 
-Because output order and the installed set are both derived from sorted config
-rather than filesystem iteration, repeated syncs of an unchanged config produce
-identical output.
+Applied artifacts and ownership manifests remain unchanged on a converged
+sync. Temporary staging and mutable remote Git metadata can change during
+source checks; fetch timing varies between runs.
 
-Global cache lives under `$XDG_CACHE_HOME/uniskill/` when available, otherwise
-`./.uniskill-cache`. Project config uses `.uniskill-cache/` next to the project
+Global cache lives under the platform cache directory (`$XDG_CACHE_HOME` or
+`~/.cache` on Linux), with `./.uniskill-cache` as the fallback when no platform
+cache directory is available. Project config uses `.uniskill-cache/` next to the project
 config.
 
 A worktree sync writes its manifest to `.uniskill-cache/state.toml` inside the
 worktree, not the shared `state.toml`. Main and worktree runs therefore prune
 only their own links: a main sync never removes a worktree's links, and a
 worktree sync never removes the main tree's. The manifest is also self-cleaning
-— it goes away when the worktree is removed.
+;  it goes away when the worktree is removed.
 
 Assembled bundle layout:
 
@@ -248,7 +244,7 @@ cache/
 └── bundles/
     └── generic/
         └── skills/
-            └── code-design/
+            └── code-architecture/
                 └── SKILL.md
 ```
 

@@ -11,9 +11,11 @@ read [README.md](README.md), [docs/DESIGN.md](docs/DESIGN.md), and
 
 ## Keep the sync contract safe
 
-`sync` must be deterministic, idempotent, and conservative with user files.
-Never delete or replace a user-owned path. Only remove symlinks recorded in the
-manifest and still pointing into the uniskill cache.
+`sync` must be deterministic, idempotent, and conservative with user files. Reapplying an already converged configuration must not rewrite files, recreate symlinks, change ownership state, or update modification times.
+Never delete or replace a user-owned skill file or directory. Only prune symlinks recorded
+in the manifest and still pointing into the uniskill cache. MCP sync may edit
+only owned server entries in native files; unrelated settings and entries stay
+intact. Adoption requires an identical existing definition.
 
 Failed bundle builds are failures, not removals. Preserve the previous cache
 and previous managed links when a source cannot be fetched, a source is invalid,
@@ -35,7 +37,9 @@ Modules own narrow jobs:
 | `cli.rs` | CLI parsing, config discovery, report printing, exit codes |
 | `config.rs` | TOML shapes, source validation, env var and path resolution |
 | `fetcher.rs` | Materializing local, URL, and git sources into the bundle cache |
-| `harnesses.rs` | Built-in harness registry |
+| `harnesses.rs` | Registry loading and configurable skill/MCP destinations |
+| `fetch_plan.rs` | Deduplicated, bounded remote downloads and progress |
+| `mcp/` | Server rendering, native documents, ownership, transactional writes |
 | `hook.rs` | Installing the `post-checkout` git hook and global dispatcher |
 | `linker.rs` | Harness symlink creation and status classification |
 | `skill.rs` | Shared skill-directory predicate |
@@ -52,7 +56,7 @@ the modules instead.
 Each shared fact has one owner:
 
 - Rust version: `rust-toolchain.toml`
-- Built-in harnesses: `harnesses::default_harnesses()`
+- Built-in harness definitions: `src/harnesses.toml`
 - Source shape: `config::SourceSpec` and `config::Source`
 - Skill directory rule: `skill::is_skill_dir`
 - Release gate: `make release`
@@ -75,7 +79,7 @@ should not add conditionals through `cli`, `linker`, or tests that do not own
 source fetching.
 
 New harnesses should be config-only unless they are built-ins. New built-ins go
-only in `harnesses::default_harnesses()`.
+only in `src/harnesses.toml`.
 
 ## Write meaningful tests
 

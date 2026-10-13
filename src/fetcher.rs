@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -16,12 +17,25 @@ use crate::config::{self, Bundle, Source, SourceSpec};
 /// A local `source` is placed by symlink when `bundle.link` (the default), so
 /// edits flow both ways between harness and working tree; remote `repo` and
 /// `url` sources are always copied — they have no working tree to link.
+#[cfg(test)]
 pub fn assemble_bundle(
     bundle_name: &str,
     bundle: &Bundle,
     cache_dir: &Path,
     source_base_dir: &Path,
 ) -> Result<PathBuf> {
+    validate_bundle(bundle)?;
+    assemble_bundle_prepared(bundle_name, bundle, cache_dir, source_base_dir, None)
+}
+
+pub fn assemble_bundle_prepared(
+    bundle_name: &str,
+    bundle: &Bundle,
+    cache_dir: &Path,
+    source_base_dir: &Path,
+    prepared: Option<&crate::fetch_plan::Prepared>,
+) -> Result<PathBuf> {
+    validate_bundle(bundle)?;
     let bundle_root = cache_dir.join("bundles").join(bundle_name);
     let staging_root = cache_dir
         .join("bundles")
@@ -38,11 +52,14 @@ pub fn assemble_bundle(
     {
         // Only a local working tree can be linked live; remote sources copy.
         let link = bundle.link && matches!(source, Source::Local(_));
-        let bundle_dir = materialize_bundle_dir(bundle_name, &source, cache_dir, source_base_dir)?;
+        let bundle_dir =
+            materialize_bundle_dir(bundle_name, &source, cache_dir, source_base_dir, prepared)?;
         place_bundle_skills(bundle_name, &bundle_dir, &skills_dir, link)?;
     }
 
-    for (skill_name, spec) in &bundle.skills {
+    let mut skills: Vec<_> = bundle.skills.iter().collect();
+    skills.sort_by_key(|(name, _)| *name);
+    for (skill_name, spec) in skills {
         let source = resolve_skill_source(skill_name, spec)?;
         let dest = skills_dir.join(skill_name);
         // An explicit skill overrides whatever the whole-bundle layer placed
@@ -55,11 +72,30 @@ pub fn assemble_bundle(
             cache_dir,
             source_base_dir,
             bundle.link,
+            prepared,
         )?;
     }
 
     replace_bundle_cache(&staging_root, &bundle_root)?;
     Ok(bundle_root)
+}
+
+pub(crate) fn validate_bundle(bundle: &Bundle) -> Result<()> {
+    if matches!(bundle.source.resolve()?, Some(Source::Url(_))) {
+        anyhow::bail!("a whole-bundle source cannot be a URL");
+    }
+    for spec in std::iter::once(&bundle.source).chain(bundle.skills.values()) {
+        if let Some(Source::Git {
+            path: Some(path), ..
+        }) = spec.resolve()?
+        {
+            resolve_repo_path(Path::new("/"), &path)?;
+        }
+    }
+    for (name, spec) in &bundle.skills {
+        resolve_skill_source(name, spec)?;
+    }
+    Ok(())
 }
 
 /// Remove a path whether it is a symlink, file, or directory. A no-op if absent.
@@ -75,7 +111,46 @@ fn remove_existing(path: &Path) -> Result<()> {
     }
 }
 
+fn same_tree(left: &Path, right: &Path) -> Result<bool> {
+    let a = fs::symlink_metadata(left)?;
+    let b = match fs::symlink_metadata(right) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if a.file_type() != b.file_type() || a.permissions().mode() != b.permissions().mode() {
+        return Ok(false);
+    }
+    if a.file_type().is_symlink() {
+        return Ok(fs::read_link(left)? == fs::read_link(right)?);
+    }
+    if a.is_file() {
+        return Ok(a.len() == b.len() && fs::read(left)? == fs::read(right)?);
+    }
+    if !a.is_dir() {
+        anyhow::bail!("unsupported file type in bundle cache");
+    }
+    let names = |path| -> Result<std::collections::BTreeSet<_>> {
+        fs::read_dir(path)?
+            .map(|entry| Ok(entry?.file_name()))
+            .collect()
+    };
+    let children = names(left)?;
+    if children != names(right)? {
+        return Ok(false);
+    }
+    for name in children {
+        if !same_tree(&left.join(&name), &right.join(&name))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
+    if same_tree(staging_root, bundle_root)? {
+        return remove_existing(staging_root);
+    }
     let backup_root = sibling_cache_path(bundle_root, "previous")?;
     remove_existing(&backup_root)?;
 
@@ -131,6 +206,7 @@ fn materialize_bundle_dir(
     source: &Source,
     cache_dir: &Path,
     base_dir: &Path,
+    prepared: Option<&crate::fetch_plan::Prepared>,
 ) -> Result<PathBuf> {
     match source {
         Source::Local(path) => Ok(config::resolve_source_from(path, base_dir)),
@@ -144,6 +220,7 @@ fn materialize_bundle_dir(
             path.as_deref(),
             cache_dir,
             base_dir,
+            prepared,
         ),
         Source::Url(_) => Err(anyhow::anyhow!(
             "bundle '{bundle_name}' cannot use a `url` source — a url is a single file, \
@@ -207,6 +284,7 @@ fn materialize_skill(
     cache_dir: &Path,
     base_dir: &Path,
     link: bool,
+    prepared: Option<&crate::fetch_plan::Prepared>,
 ) -> Result<()> {
     match source {
         Source::Local(path) => {
@@ -228,13 +306,19 @@ fn materialize_skill(
                 path.as_deref(),
                 cache_dir,
                 base_dir,
+                prepared,
             )?;
             copy_skill_dir(skill_name, &source, dest)
         }
         Source::Url(url) => {
             fs::create_dir_all(dest)
                 .with_context(|| format!("failed to create skill cache dir for '{skill_name}'"))?;
-            download_skill(url, &dest.join("SKILL.md"))
+            match prepared {
+                Some(prepared) => fs::copy(prepared.url(url)?, dest.join("SKILL.md"))
+                    .map(|_| ())
+                    .context("failed to copy downloaded skill"),
+                None => download_skill(url, &dest.join("SKILL.md")),
+            }
         }
     }
 }
@@ -247,9 +331,13 @@ fn resolve_git_dir(
     path: Option<&str>,
     cache_dir: &Path,
     base_dir: &Path,
+    prepared: Option<&crate::fetch_plan::Prepared>,
 ) -> Result<PathBuf> {
     let repo = config::resolve_repo_from(repo, base_dir);
-    let repo_root = fetch_git_repo(&repo, git_ref, cache_dir)?;
+    let repo_root = match prepared {
+        Some(prepared) => prepared.git(&repo, git_ref)?,
+        None => fetch_git_repo(&repo, git_ref, cache_dir)?,
+    };
     match path {
         Some(path) => resolve_repo_path(&repo_root, path),
         None => Ok(repo_root),
@@ -257,7 +345,11 @@ fn resolve_git_dir(
 }
 
 /// Fetch a git repository into the local cache.
-fn fetch_git_repo(repo: &str, git_ref: Option<&str>, base_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn fetch_git_repo(
+    repo: &str,
+    git_ref: Option<&str>,
+    base_dir: &Path,
+) -> Result<PathBuf> {
     let repo_url = normalize_repo_url(repo);
     let ref_key = git_ref.unwrap_or("head");
     let repo_dir =
@@ -266,6 +358,19 @@ fn fetch_git_repo(repo: &str, git_ref: Option<&str>, base_dir: &Path) -> Result<
             .join(format!("{}-{}", cache_key(&repo_url), cache_key(ref_key)));
 
     if repo_dir.exists() {
+        if let Some(commit) = git_ref
+            .filter(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            let object = Command::new("git")
+                .arg("-C")
+                .arg(&repo_dir)
+                .args(["cat-file", "-t", commit])
+                .output()?;
+            if object.status.success() && object.stdout == b"commit\n" {
+                run_git(&repo_dir, &["reset", "--hard", "--quiet", commit])?;
+                return Ok(repo_dir);
+            }
+        }
         run_git(&repo_dir, &["fetch", "--quiet", "--prune", "origin"])?;
     } else {
         if let Some(parent) = repo_dir.parent() {
@@ -290,10 +395,10 @@ fn fetch_git_repo(repo: &str, git_ref: Option<&str>, base_dir: &Path) -> Result<
     if let Some(requested_ref) = git_ref {
         run_git(&repo_dir, &["checkout", "--quiet", requested_ref])?;
         if checked_out_branch(&repo_dir)?.is_some() {
-            run_git(&repo_dir, &["pull", "--ff-only", "--quiet"])?;
+            run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "@{upstream}"])?;
         }
     } else {
-        run_git(&repo_dir, &["pull", "--ff-only", "--quiet"])?;
+        run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "@{upstream}"])?;
     }
 
     Ok(repo_dir)
@@ -385,7 +490,7 @@ fn copy_dir_all(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn normalize_repo_url(repo: &str) -> String {
+pub(crate) fn normalize_repo_url(repo: &str) -> String {
     if let Some(path) = repo.strip_prefix("gh:") {
         github_ssh_url(path)
     } else if let Some(path) = repo.strip_prefix("github:") {
@@ -500,6 +605,7 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
     let existing_size = fs::metadata(dest).ok().map(|m| m.len());
 
     let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(30))
         .call()
         .with_context(|| format!("failed to fetch skill from {url}"))?;
 
@@ -542,6 +648,14 @@ fn download_skill(url: &str, dest: &Path) -> Result<()> {
         .with_context(|| format!("failed to replace skill file at {:?}", dest))?;
 
     Ok(())
+}
+
+pub(crate) fn cache_url(url: &str, cache: &Path) -> Result<PathBuf> {
+    let dir = cache.join("downloads").join(cache_key(url));
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("SKILL.md");
+    download_skill(url, &path)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -934,6 +1048,28 @@ mod tests {
     #[test]
     fn test_cache_key_keeps_sanitized_collisions_distinct() {
         assert_ne!(cache_key("owner/repo"), cache_key("owner:repo"));
+    }
+
+    #[test]
+    fn cached_immutable_commit_remains_usable_without_its_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        write_skill_dir(&origin, "fixture");
+        init_git_repo(&origin);
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&origin)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let commit = String::from_utf8(output.stdout).unwrap().trim().to_string();
+        let cache = temp.path().join("cache");
+        let first = fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
+        fs::remove_dir_all(&origin).unwrap();
+        let second = fetch_git_repo(origin.to_str().unwrap(), Some(&commit), &cache).unwrap();
+        assert_eq!(first, second);
+        assert!(second.join("SKILL.md").exists());
+        assert!(fetch_git_repo(origin.to_str().unwrap(), Some("main"), &cache).is_err());
     }
 
     #[test]
