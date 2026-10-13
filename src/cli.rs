@@ -240,7 +240,10 @@ fn worktree_inputs(
 
 /// Shared cache directory for globally-configured bundles.
 fn shared_cache_dir() -> PathBuf {
-    dirs::cache_dir()
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(dirs::cache_dir)
         .map(|d| d.join(DEFAULT_CACHE_DIR))
         .unwrap_or_else(|| PathBuf::from("./.uniskill-cache"))
 }

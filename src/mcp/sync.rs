@@ -62,7 +62,7 @@ pub fn check(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
-    let state_dir = state_dir.join("mcp");
+    let state_dir = absolute_path(&state_dir.join("mcp").to_string_lossy())?;
     if transaction::pending(&state_dir) {
         bail!("interrupted MCP transaction; run sync to recover before checking");
     }
@@ -76,7 +76,7 @@ pub fn sync(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
-    let state_dir = state_dir.join("mcp");
+    let state_dir = absolute_path(&state_dir.join("mcp").to_string_lossy())?;
     if servers.is_empty() && !state_dir.exists() {
         return Ok(Report::default());
     }

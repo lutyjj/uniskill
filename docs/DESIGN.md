@@ -226,9 +226,9 @@ Applied artifacts and ownership manifests remain unchanged on a converged
 sync. Temporary staging and mutable remote Git metadata can change during
 source checks; fetch timing varies between runs.
 
-Global cache lives under the platform cache directory (`$XDG_CACHE_HOME` or
-`~/.cache` on Linux), with `./.uniskill-cache` as the fallback when no platform
-cache directory is available. Project config uses `.uniskill-cache/` next to the project
+Global cache uses an absolute `$XDG_CACHE_HOME` when set, otherwise the platform
+cache directory (`~/.cache` on Linux). `./.uniskill-cache` is the fallback when
+no platform cache directory is available. Project config uses `.uniskill-cache/` next to the project
 config.
 
 A worktree sync writes its manifest to `.uniskill-cache/state.toml` inside the
