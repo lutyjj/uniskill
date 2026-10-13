@@ -231,6 +231,19 @@ fn plan(
     }
     let mut identities: BTreeSet<Identity> = desired.keys().cloned().collect();
     identities.extend(owned.keys().cloned());
+    let mut tables = BTreeMap::<&Path, BTreeSet<&Vec<String>>>::new();
+    for identity in &identities {
+        tables
+            .entry(&identity.path)
+            .or_default()
+            .insert(&identity.table);
+    }
+    for tables in tables.values() {
+        let tables: Vec<_> = tables.iter().collect();
+        if tables.windows(2).any(|pair| pair[1].starts_with(pair[0])) {
+            bail!("MCP table paths in one file must not overlap");
+        }
+    }
     let mut documents = BTreeMap::<PathBuf, (Format, Option<Vec<u8>>, Document, bool)>::new();
     let mut entries = Vec::new();
     let mut report = Report::default();
@@ -304,6 +317,9 @@ fn plan(
                 });
             }
         }
+    }
+    if entries.len() > 16384 {
+        bail!("MCP ownership exceeds 16384 entries");
     }
     let state = State {
         version: 1,

@@ -516,3 +516,20 @@ fn routes_through_symlinked_ancestors_keep_stable_ownership_for_new_directories(
         modified
     );
 }
+
+#[test]
+fn overlapping_server_maps_are_rejected_before_writing_native_configs() {
+    let f = Fixture::new(&format!(
+        r#"{JSON_TARGET}
+[harnesses.overlap.mcp]
+path = "native.json"
+format = "json"
+table = ["tools", "servers", "docs"]
+[mcp.other]
+harnesses = ["overlap"]
+command = "fixture"
+"#
+    ));
+    assert!(!f.run(&["--mcp-only"]).status.success());
+    assert!(!f.path("native.json").exists());
+}
