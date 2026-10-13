@@ -34,7 +34,7 @@ config change. The next sync picks it up.
 from any harness. Commit and push from the repo when changes are ready.
 
 ```toml
-# agent-skills/configs/global.toml (run: uniskill --config configs/global.toml sync)
+# agent-skills/configs/global.toml (skills fragment)
 
 [bundles.generic]
 harnesses = ["pi", "claude-code"]
@@ -49,6 +49,14 @@ Because a local `source` links straight to the working tree, editing
 directly. `git pull` is live in every harness; you only re-run `sync` when a
 skill is added or removed. When changes are ready, commit and push from the repo.
 `caveman` stays a copied `url` skill because only local sources link.
+
+On a skills-only machine, point `~/.config/uniskill/config.toml` at this file.
+With MCP catalogs, include it in the [complete machine wrapper](#journey-7-one-private-mcp-catalog-for-several-agents).
+Use that complete config when adding or removing skills:
+
+```bash
+uniskill --config "$HOME/.config/uniskill/config.toml" sync
+```
 
 ## Journey 2: Custom global harness
 
@@ -172,7 +180,13 @@ bearer_token_env_var = "DOCS_TOKEN"
 exposure = "direct"
 ```
 
-Run `uniskill sync --check-mcp` to inspect whether MCP changes are pending,
-then `uniskill sync`. Matching existing entries require `--adopt-mcp` once.
+Select the complete wrapper explicitly, including from a project directory:
+
+```bash
+uniskill --config "$HOME/.config/uniskill/config.toml" sync --check-mcp
+uniskill --config "$HOME/.config/uniskill/config.toml" sync
+```
+
+Matching existing entries require `--adopt-mcp` once.
 Keep private files outside Git. See [MCP.md](MCP.md) for ownership conflicts,
 reference handling, and native config precedence.

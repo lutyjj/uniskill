@@ -146,15 +146,9 @@ fn read_journal(state_dir: &Path) -> Result<Option<Journal>> {
     Ok(Some(journal))
 }
 
-pub fn journal_targets(state_dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn journal_updates(state_dir: &Path) -> Result<Vec<Update>> {
     Ok(read_journal(state_dir)?
-        .map(|journal| {
-            journal
-                .updates
-                .into_iter()
-                .map(|update| update.path)
-                .collect()
-        })
+        .map(|journal| journal.updates)
         .unwrap_or_default())
 }
 

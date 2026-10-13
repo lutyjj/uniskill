@@ -722,3 +722,122 @@ fn separate_project_writers_and_recovery_share_the_native_destination_lock() {
     assert_eq!(fs::read(&native).unwrap(), bytes);
     assert_eq!(fs::metadata(native).unwrap().modified().unwrap(), modified);
 }
+
+#[test]
+fn restored_ownership_is_locked_even_when_the_journal_only_updates_state() {
+    use std::fs::{File, TryLockError};
+    use std::time::{Duration, Instant};
+
+    let f = Fixture::new(JSON_TARGET);
+    f.write("native.json", br#"{"keep":true}"#);
+    succeeded(f.run(&["--mcp-only"]));
+    let state = f.path("cache/uniskill/mcp/state.json");
+    let owned = fs::read_to_string(&state).unwrap();
+    let definition = f.json("native.json")["tools"]["servers"]["docs"].clone();
+    // Removing an already absent owned entry only writes ownership. Simulate
+    // interruption after that state write but before its journal was removed.
+    f.write("native.json", br#"{"keep":true}"#);
+    fs::write(&f.config, "").unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    let empty = fs::read_to_string(&state).unwrap();
+    let journal = f.path("cache/uniskill/mcp/journal.json");
+    fs::write(
+        &journal,
+        serde_json::to_vec(&json!({
+            "version":1,"updates":[{"path":state,"before":owned,"after":empty,"mode":384}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    f.write(
+        "other.toml",
+        JSON_TARGET.replace("mcp.docs", "mcp.manual").as_bytes(),
+    );
+    let other = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_uniskill"));
+        cmd.args(["--config", f.path("other.toml").to_str().unwrap(), "sync"])
+            .current_dir(f.temp.path())
+            .env("XDG_CACHE_HOME", f.path("other-cache"));
+        cmd
+    };
+    succeeded(other().arg("--mcp-only").output().unwrap());
+    let other_state = f.path("other-cache/uniskill/mcp/state.json");
+    let other_owned = fs::read(&other_state).unwrap();
+    let mut recreated = f.json("native.json");
+    recreated["tools"]["servers"]["docs"] = definition;
+    f.write("native.json", &serde_json::to_vec(&recreated).unwrap());
+    let original = fs::read(f.path("native.json")).unwrap();
+    let sidecar = fs::read_dir(f.temp.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".uniskill-mcp-")
+        })
+        .unwrap();
+    let guard = File::options()
+        .read(true)
+        .write(true)
+        .open(sidecar)
+        .unwrap();
+    guard.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_uniskill"))
+        .args(["--config", f.config.to_str().unwrap(), "sync", "--mcp-only"])
+        .current_dir(f.temp.path())
+        .env("XDG_CACHE_HOME", f.path("cache"))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(f.path("cache/uniskill/mcp/lock"))
+            .unwrap();
+        if matches!(file.try_lock(), Err(TryLockError::WouldBlock)) {
+            break;
+        }
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "recovery finished while its restored destination was locked"
+        );
+        assert!(Instant::now() < deadline, "recovery did not reach its lock");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(fs::read(f.path("native.json")).unwrap(), original);
+    assert_eq!(fs::read_to_string(&state).unwrap(), empty);
+    assert!(journal.exists());
+    drop(guard);
+    succeeded(child.wait_with_output().unwrap());
+    let result = f.json("native.json");
+    assert_eq!(result["keep"], true);
+    assert!(result["tools"]["servers"]["docs"].is_null());
+    assert!(result["tools"]["servers"]["manual"].is_object());
+    assert_eq!(fs::read(&other_state).unwrap(), other_owned);
+    succeeded(other().arg("--check-mcp").output().unwrap());
+    succeeded(f.run(&["--check-mcp"]));
+}
+
+#[test]
+fn invalid_restored_ownership_preserves_the_journal_and_current_state() {
+    let f = Fixture::new("");
+    let state = f.path("cache/uniskill/mcp/state.json");
+    let current = r#"{"version":1,"entries":[]}"#;
+    f.write("cache/uniskill/mcp/state.json", current.as_bytes());
+    let journal = serde_json::to_vec(&json!({
+        "version":1,"updates":[{"path":state,"before":"invalid","after":current,"mode":384}]
+    }))
+    .unwrap();
+    f.write("cache/uniskill/mcp/journal.json", &journal);
+    assert!(!f.run(&["--mcp-only"]).status.success());
+    assert_eq!(fs::read_to_string(state).unwrap(), current);
+    assert_eq!(
+        fs::read(f.path("cache/uniskill/mcp/journal.json")).unwrap(),
+        journal
+    );
+}

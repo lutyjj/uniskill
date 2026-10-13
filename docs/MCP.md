@@ -64,6 +64,11 @@ secret catalogs outside Git with restrictive file and directory permissions.
 MCP without fetching or linking skills. `sync --check-mcp` performs a read-only
 check and exits 1 when changes or conflicts remain; it creates no cache.
 
+The selected config is authoritative for its cache's owned MCP entries. Include
+every catalog in the complete machine wrapper and select that wrapper for
+maintenance. Applying a fragment through the same cache removes unchanged owned
+entries omitted from that fragment.
+
 Existing unmanaged entries are conflicts. `--adopt-mcp` takes ownership only
 when the existing definition exactly matches the rendered definition. Subsequent
 syncs update or remove entries only when their value still matches the recorded
@@ -82,8 +87,10 @@ All MCP files and ownership state are planned before writing. A private,
 mode-0600 journal records before/after contents; atomic file replacement and
 fsync protect each write. Persistent mode-0600 `.uniskill-mcp-<digest>.lock`
 sidecars beside native files coordinate writers across config and cache scopes.
-Destination locks are acquired in path order before recovery and planning;
-ownership manifests remain scoped to their caches. A failed or
+Destination locks cover desired entries, current ownership, journal native
+updates, and ownership entries that recovery can restore. They are acquired
+in path order before recovery and planning. Ownership manifests remain scoped
+to their caches. A failed or
 interrupted apply rolls back its own bytes; a later sync recovers the journal.
 Files edited since the interrupted write are preserved and reported. Recovery
 I/O failures require inspection before continuing. The journal can contain

@@ -99,9 +99,16 @@ pub fn sync(
         .chain(previous.owned.keys())
         .map(|identity| identity.path.clone())
         .collect();
-    for path in transaction::journal_targets(&state_dir)? {
-        if path != state_dir.join("state.json") {
-            paths.insert(absolute_path(&path.to_string_lossy())?);
+    for update in transaction::journal_updates(&state_dir)? {
+        let path = absolute_path(&update.path.to_string_lossy())?;
+        if path == state_dir.join("state.json") {
+            paths.extend(
+                decode_owned(update.before.as_deref().map(str::as_bytes))?
+                    .into_keys()
+                    .map(|identity| identity.path),
+            );
+        } else {
+            paths.insert(path);
         }
     }
     let _destinations = transaction::lock_destinations(&paths)?;
@@ -216,9 +223,13 @@ fn desired_entries(
 }
 
 fn load_state(state_dir: &Path) -> Result<LoadedState> {
-    let state_path = state_dir.join("state.json");
-    let state_bytes = transaction::read(&state_path)?;
-    let previous: State = match &state_bytes {
+    let bytes = transaction::read(&state_dir.join("state.json"))?;
+    let owned = decode_owned(bytes.as_deref())?;
+    Ok(LoadedState { bytes, owned })
+}
+
+fn decode_owned(bytes: Option<&[u8]>) -> Result<BTreeMap<Identity, Owned>> {
+    let previous: State = match bytes {
         Some(bytes) => serde_json::from_slice(bytes).map_err(|_| {
             anyhow!("invalid MCP ownership state; refusing to change native configuration")
         })?,
@@ -244,10 +255,7 @@ fn load_state(state_dir: &Path) -> Result<LoadedState> {
             bail!("duplicate MCP ownership identity");
         }
     }
-    Ok(LoadedState {
-        bytes: state_bytes,
-        owned,
-    })
+    Ok(owned)
 }
 
 fn plan(
