@@ -936,3 +936,132 @@ fn recovery_preserved_native_files_are_tracked_without_prior_entry_ownership() {
         before
     );
 }
+
+#[test]
+fn deleted_retired_directories_expire_tracking_even_with_dangling_aliases() {
+    use std::os::unix::fs::symlink;
+    for replacement in [None, Some("Unrelated file.")] {
+        let f = Fixture::new(&JSON_TARGET.replace("native.json", "alias/config.json"));
+        fs::create_dir(f.path("native")).unwrap();
+        symlink("native", f.path("alias")).unwrap();
+        succeeded(f.run(&["--mcp-only"]));
+        fs::write(&f.config, "").unwrap();
+        succeeded(f.run(&["--mcp-only"]));
+        let state = f.path("cache/uniskill/mcp/state.json");
+        let before = fs::read(&state).unwrap();
+        fs::remove_file(f.path("native/config.json")).unwrap();
+        for entry in fs::read_dir(f.path("native")).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        fs::remove_dir(f.path("native")).unwrap();
+        if let Some(bytes) = replacement {
+            f.write("native", bytes.as_bytes());
+        }
+        let check = f.run(&["--check-mcp"]);
+        assert!(!check.status.success());
+        assert!(String::from_utf8_lossy(&check.stderr).contains("MCP definitions need syncing"));
+        assert_eq!(fs::read(&state).unwrap(), before);
+        succeeded(f.run(&["--mcp-only"]));
+        assert_eq!(f.json("cache/uniskill/mcp/state.json")["files"], json!([]));
+        f.write("source/SKILL.md", b"Fixture skill.\n");
+        fs::write(&f.config, "[harnesses.fixture]\npattern='skills/{name}'\n[bundles.local]\nharnesses=['fixture']\n[bundles.local.skills.fixture]\nsource='source'\n").unwrap();
+        succeeded(f.run(&[]));
+        assert!(f.path("skills/fixture/SKILL.md").is_file());
+        succeeded(f.run(&["--check-mcp"]));
+        if let Some(bytes) = replacement {
+            assert_eq!(fs::read_to_string(f.path("native")).unwrap(), bytes);
+        } else {
+            assert!(!f.path("native").exists());
+        }
+        assert_eq!(fs::read_link(f.path("alias")).unwrap(), Path::new("native"));
+    }
+}
+
+#[test]
+fn interrupted_retired_tracking_cleanup_recovers_with_deleted_directory_aliases() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new(&JSON_TARGET.replace("native.json", "alias/config.json"));
+    fs::create_dir(f.path("native")).unwrap();
+    symlink("native", f.path("alias")).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    fs::write(&f.config, "").unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    let state = f.path("cache/uniskill/mcp/state.json");
+    let before = fs::read_to_string(&state).unwrap();
+    fs::remove_file(f.path("native/config.json")).unwrap();
+    for entry in fs::read_dir(f.path("native")).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    fs::remove_dir(f.path("native")).unwrap();
+    let after = json!({"version":2,"entries":[],"files":[]}).to_string();
+    fs::write(&state, &after).unwrap();
+    let journal = f.path("cache/uniskill/mcp/journal.json");
+    fs::write(
+        &journal,
+        serde_json::to_vec(&json!({"version":1,"updates":[{
+            "path":state,"before":before,"after":after,"mode":384
+        }]}))
+        .unwrap(),
+    )
+    .unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    assert_eq!(f.json("cache/uniskill/mcp/state.json")["files"], json!([]));
+    assert!(!journal.exists());
+    assert!(!f.path("native").exists());
+    let converged = (
+        fs::read(&state).unwrap(),
+        fs::metadata(&state).unwrap().modified().unwrap(),
+    );
+    succeeded(f.run(&["--mcp-only"]));
+    succeeded(f.run(&["--check-mcp"]));
+    assert_eq!(
+        (
+            fs::read(&state).unwrap(),
+            fs::metadata(&state).unwrap().modified().unwrap()
+        ),
+        converged
+    );
+}
+
+#[test]
+fn active_ownership_and_native_recovery_writes_reject_dangling_parents() {
+    use std::os::unix::fs::symlink;
+    for recovery in [false, true] {
+        let f = Fixture::new(&JSON_TARGET.replace("native.json", "native/config.json"));
+        succeeded(f.run(&["--mcp-only"]));
+        fs::write(&f.config, "").unwrap();
+        if recovery {
+            succeeded(f.run(&["--mcp-only"]));
+        }
+        fs::remove_file(f.path("native/config.json")).unwrap();
+        for entry in fs::read_dir(f.path("native")).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        fs::remove_dir(f.path("native")).unwrap();
+        symlink("missing", f.path("native")).unwrap();
+        let state = f.path("cache/uniskill/mcp/state.json");
+        let before = fs::read(&state).unwrap();
+        let journal = f.path("cache/uniskill/mcp/journal.json");
+        if recovery {
+            fs::write(
+                &journal,
+                serde_json::to_vec(&json!({"version":1,"updates":[{
+                    "path":f.path("native/config.json"),"before":null,"after":"{}","mode":384
+                }]}))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let journal_bytes = fs::read(&journal).ok();
+        for _ in 0..2 {
+            assert!(!f.run(&["--mcp-only"]).status.success());
+            assert_eq!(fs::read(&state).unwrap(), before);
+            assert_eq!(fs::read(&journal).ok(), journal_bytes);
+            assert_eq!(
+                fs::read_link(f.path("native")).unwrap(),
+                Path::new("missing")
+            );
+            assert!(!f.path("missing").exists());
+        }
+    }
+}

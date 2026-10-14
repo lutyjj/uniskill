@@ -228,11 +228,11 @@ mutation. State persistence failures return a failed sync. Both ownership engine
 use bounded regular-file reads and reject symlinked state files.
 
 MCP requires a journal because it edits shared native documents and must restore
-their before-images. Skills retain their own cache/link lifecycle and share only
-bounded reads, atomic file replacement, and destination path resolution with MCP.
-A transaction spanning caches and links would also need durable link and directory
-before-images;
-revisit that boundary if all-or-nothing skill application becomes a requirement.
+their before-images. Skills retain their own cache/link lifecycle. The engines
+share bounded reads, atomic file replacement, destination path resolution, and
+resource protection. A transaction spanning caches and links would also need
+durable link and directory before-images; revisit that boundary if all-or-nothing
+skill application becomes a requirement.
 
 For a linked local source the harness symlink resolves through the cache entry
 to the working tree, so the cache is an index of live links rather than copies.

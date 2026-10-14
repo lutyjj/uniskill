@@ -300,25 +300,10 @@ fn desired_entries(
 fn load_state(state_dir: &Path) -> Result<LoadedState> {
     let bytes = transaction::read(&state_dir.join("state.json"))?;
     let (owned, files) = decode_state(bytes.as_deref())?;
-    let active: BTreeSet<_> = owned.keys().map(|identity| &identity.path).collect();
-    let mut retained = BTreeSet::new();
-    for file in files {
-        match std::fs::symlink_metadata(&file) {
-            Ok(_) => {
-                retained.insert(file);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if active.contains(&crate::filesystem::destination_path(&file)?) {
-                    retained.insert(file);
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
     Ok(LoadedState {
         bytes,
         owned,
-        files: retained,
+        files,
     })
 }
 
@@ -345,10 +330,6 @@ fn decode_state(bytes: Option<&[u8]>) -> Result<(Ownership, BTreeSet<PathBuf>)> 
     if files.len() > 16384 || files.iter().any(|path| !path.is_absolute()) {
         bail!("invalid MCP tracked files");
     }
-    let physical_files = files
-        .iter()
-        .map(|path| crate::filesystem::destination_path(path))
-        .collect::<Result<BTreeSet<_>>>()?;
     let mut owned = BTreeMap::new();
     for mut entry in previous.entries {
         if !entry.identity.path.is_absolute()
@@ -361,12 +342,48 @@ fn decode_state(bytes: Option<&[u8]>) -> Result<(Ownership, BTreeSet<PathBuf>)> 
         entry.identity.path = crate::filesystem::destination_path(&entry.identity.path)?;
         if previous.version == 1 {
             files.insert(entry.identity.path.clone());
-        } else if !physical_files.contains(&entry.identity.path) {
-            bail!("MCP ownership refers to an untracked file");
         }
         if owned.insert(entry.identity.clone(), entry).is_some() {
             bail!("duplicate MCP ownership identity");
         }
+    }
+    let active: BTreeSet<_> = owned.keys().map(|identity| &identity.path).collect();
+    let mut retained = BTreeSet::new();
+    for file in files {
+        match std::fs::symlink_metadata(&file) {
+            Ok(_) => {}
+            // An inactive file is also absent when its parent is now a file.
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A deleted retired directory may leave an unresolvable alias.
+                // Active identities and journal write paths keep their own strict validation.
+                match crate::filesystem::destination_path(&file) {
+                    Ok(path) if active.contains(&path) => {}
+                    Ok(_) => continue,
+                    Err(error)
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        continue
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        retained.insert(file);
+    }
+    files = retained;
+    let physical_files = files
+        .iter()
+        .map(|path| crate::filesystem::destination_path(path))
+        .collect::<Result<BTreeSet<_>>>()?;
+    if owned
+        .keys()
+        .any(|identity| !physical_files.contains(&identity.path))
+    {
+        bail!("MCP ownership refers to an untracked file");
     }
     Ok((owned, files))
 }
