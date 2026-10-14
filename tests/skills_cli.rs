@@ -1856,6 +1856,78 @@ fn copied_git_skills_exclude_repository_metadata_and_converge() {
 }
 
 #[test]
+fn git_revision_updates_ignore_cached_tracking_refs() {
+    let f = Fixture::new();
+    let origin = f.repo("origin");
+    f.skill("origin", "default");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "default"]));
+    success(f.git(&origin, &["checkout", "-qb", "head"]));
+    f.skill("origin", "selected");
+    success(f.git(&origin, &["commit", "-qam", "selected"]));
+    success(f.git(&origin, &["checkout", "-q", "main"]));
+    let config=f.write("config.toml","[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\n[bundles.one.skills.demo]\nrepo='./origin'\nref='head'\n");
+    success(f.run(&config, &[]));
+    for entry in fs::read_dir(f.path("cache/uniskill/repos")).unwrap() {
+        let cache = entry.unwrap().path();
+        success(f.git(
+            &cache,
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        ));
+        success(f.git(
+            &cache,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/head",
+                "refs/remotes/origin/main",
+            ],
+        ));
+    }
+    success(f.git(&origin, &["checkout", "-q", "head"]));
+    f.skill("origin", "updated");
+    success(f.git(&origin, &["commit", "-qam", "updated"]));
+    success(f.git(&origin, &["checkout", "-q", "main"]));
+    success(f.run(&config, &[]));
+    assert_eq!(
+        fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+        "updated"
+    );
+}
+
+#[test]
+fn default_git_sources_follow_remote_head_across_branch_switches() {
+    let f = Fixture::new();
+    let origin = f.repo("origin");
+    f.skill("origin", "ancestor");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "ancestor"]));
+    success(f.git(&origin, &["branch", "ancestor"]));
+    f.skill("origin", "main");
+    success(f.git(&origin, &["commit", "-qam", "main"]));
+    success(f.git(&origin, &["checkout", "-qb", "divergent", "ancestor"]));
+    f.skill("origin", "divergent");
+    success(f.git(&origin, &["commit", "-qam", "divergent"]));
+    success(f.git(&origin, &["checkout", "-q", "main"]));
+    let config=f.write("config.toml","[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\n[bundles.one.skills.demo]\nrepo='./origin'\n");
+    for branch in ["main", "ancestor", "divergent", "main"] {
+        success(f.git(
+            &origin,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+        ));
+        success(f.run(&config, &[]));
+        assert_eq!(
+            fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+            branch
+        );
+    }
+}
+
+#[test]
 fn competing_skill_routes_fail_without_replacing_the_installed_link() {
     let f = Fixture::new();
     f.skill("source", "one");

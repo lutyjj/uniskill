@@ -113,14 +113,15 @@ path = "bundles/generic/skills/technical-writing"
 ```
 
 uniskill clones or fetches the repository into the cache and copies the selected
-skill directory into the assembled bundle. Explicit branches and tags resolve
-by exact ref name to commit IDs before checkout, so filesystem aliases cannot
-select a different revision. An explicit `ref` uses a detached checkout; an
-omitted `ref` follows the remote's `HEAD` without relying on cached tracking refs.
+skill directory into the assembled bundle. Named refs resolve against the
+remote's advertised names. uniskill fetches the selected object and checks out
+its commit directly; cached tracking refs and branch ancestry never choose
+content. An omitted `ref` selects the remote's `HEAD`.
 
 Full commit IDs take precedence over names on initial fetch and cache reuse.
 Use `refs/heads/...` or `refs/tags/...` for a branch or tag whose name looks like
 a full commit ID.
+Abbreviated commit IDs must identify one fetched object.
 
 GitHub shorthands (`owner/repo`, `gh:owner/repo`, `github:owner/repo`) resolve
 to SSH URLs. Plain SSH, HTTPS, and local git paths are passed through.

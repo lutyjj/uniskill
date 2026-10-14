@@ -382,22 +382,6 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
                 return Ok(repo_dir);
             }
         }
-        if git_ref.is_none() {
-            run_git(
-                &repo_dir,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--refmap=",
-                    "--",
-                    "origin",
-                    "HEAD",
-                ],
-            )?;
-        } else {
-            run_git(&repo_dir, &["fetch", "--quiet", "--prune", "origin"])?;
-        }
     } else {
         if let Some(parent) = repo_dir.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -418,15 +402,15 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
         .with_context(|| format!("failed to clone git skill repository {repo_url}"))?;
     }
 
-    if let Some(requested_ref) = git_ref {
-        let commit = match immutable_commit {
-            Some(commit) => commit.to_string(),
-            None => resolve_git_ref(&repo_dir, requested_ref)?,
-        };
-        run_git(&repo_dir, &["checkout", "--quiet", "--detach", &commit])?;
-    } else if cached {
-        run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "FETCH_HEAD"])?;
-    }
+    let commit = match immutable_commit {
+        Some(commit) => {
+            let object = commit.to_ascii_lowercase();
+            fetch_git_objects(&repo_dir, &[&object])?;
+            object
+        }
+        None => fetch_git_revision(&repo_dir, git_ref)?,
+    };
+    run_git(&repo_dir, &["checkout", "--quiet", "--detach", &commit])?;
 
     Ok(repo_dir)
 }
@@ -547,35 +531,83 @@ fn run_command(command: &mut Command) -> Result<std::process::Output> {
     ))
 }
 
-fn resolve_git_ref(repo_dir: &Path, requested_ref: &str) -> Result<String> {
-    // Enumerate exact names so metadata aliases cannot shadow branches or tags.
-    let output = run_command(
-        Command::new("git")
-            .arg("-C")
-            .arg(repo_dir)
-            .args(["for-each-ref", "--format=%(refname)%09%(objectname)"]),
-    )?;
-    let references = output.stdout;
-    let candidates = if let Some(branch) = requested_ref.strip_prefix("refs/heads/") {
-        vec![format!("refs/remotes/origin/{branch}")]
-    } else if requested_ref.starts_with("refs/") {
-        vec![requested_ref.to_string()]
-    } else {
-        vec![
-            format!("refs/remotes/origin/{requested_ref}"),
-            format!("refs/tags/{requested_ref}"),
-        ]
+fn fetch_git_objects(repo_dir: &Path, objects: &[&str]) -> Result<()> {
+    for batch in objects.chunks(128) {
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(repo_dir)
+                .args(["fetch", "--quiet", "--no-tags", "--refmap=", "--", "origin"])
+                .args(batch),
+        )?;
+    }
+    Ok(())
+}
+
+fn fetch_git_revision(repo_dir: &Path, requested_ref: Option<&str>) -> Result<String> {
+    let output = run_command(Command::new("git").arg("-C").arg(repo_dir).args([
+        "ls-remote",
+        "--",
+        "origin",
+    ]))?;
+    let references: Vec<_> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            let separator = line.iter().position(|byte| *byte == b'\t')?;
+            let name = &line[separator + 1..];
+            if name.ends_with(b"^{}") {
+                return None;
+            }
+            Some((&line[..separator], name))
+        })
+        .collect();
+    let candidates = match requested_ref {
+        None | Some("HEAD") => vec!["HEAD".to_string()],
+        Some(reference) if reference.starts_with("refs/") => vec![reference.to_string()],
+        Some(reference) => vec![
+            format!("refs/heads/{reference}"),
+            format!("refs/tags/{reference}"),
+        ],
     };
     let named = candidates.iter().find_map(|candidate| {
-        references.split(|byte| *byte == b'\n').find_map(|line| {
-            let separator = line.iter().position(|byte| *byte == b'\t')?;
-            (line[..separator] == *candidate.as_bytes()).then_some(&line[separator + 1..])
-        })
+        references
+            .iter()
+            .find_map(|(object, name)| (*name == candidate.as_bytes()).then_some(*object))
     });
     let revision = match named {
-        Some(object) => std::str::from_utf8(object)?,
-        None if requested_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) => requested_ref,
-        None => anyhow::bail!("git ref not found: {requested_ref}"),
+        Some(object) => {
+            let object = std::str::from_utf8(object)?;
+            fetch_git_objects(repo_dir, &[object])?;
+            object.to_string()
+        }
+        None => {
+            let prefix = requested_ref
+                .filter(|reference| reference.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("git ref not found: {}", requested_ref.unwrap_or("HEAD"))
+                })?;
+            let mut objects = references
+                .iter()
+                .map(|(object, _)| std::str::from_utf8(object))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            objects.sort_unstable();
+            objects.dedup();
+            fetch_git_objects(repo_dir, &objects)?;
+            let output = run_command(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(repo_dir)
+                    .arg("rev-parse")
+                    .arg(format!("--disambiguate={prefix}")),
+            )?;
+            let output = String::from_utf8(output.stdout)?;
+            let objects: Vec<_> = output.lines().collect();
+            match objects.as_slice() {
+                [object] => object.to_string(),
+                _ => anyhow::bail!("git commit prefix not found or ambiguous: {prefix}"),
+            }
+        }
     };
     let output = run_command(
         Command::new("git")
