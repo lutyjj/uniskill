@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn interrupted_apply_keeps_intended_ownership_for_the_next_sync() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let source = temp.path().join("source");
         write_skill_dir(&source.join("skills/demo"), "demo");
         let cache = temp.path().join("cache");
@@ -805,7 +805,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let cache = temp.path().join("cache");
         let source = temp.path().join("source");
         let main = temp.path().join("main");
@@ -902,7 +902,7 @@ mod tests {
 
     #[test]
     fn test_manifest_records_stable_harness_key() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path().join("cache");
         let source = tmp.path().join("source");
         write_skill_dir(&source.join("skills").join("code-design"), "code-design");
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_unknown_harness_retains_previous_manifest_link() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path().join("cache");
         let old_skill = cache
             .join("bundles")

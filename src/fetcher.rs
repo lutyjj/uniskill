@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn maximum_length_bundle_keys_install_update_and_recover() {
         for length in [245, 246, 255] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::test_support::tempdir().unwrap();
             let name = "a".repeat(length);
             let source = temp.path().join("source");
             write_skill_dir(&source.join("skills/demo"), "first");
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_copies_local_skill_when_link_false() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let base = tmp.path().join("cache");
         let source = tmp.path().join("source").join("code-design");
         fs::create_dir_all(source.join("agents")).unwrap();
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_links_local_skill_by_default() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let base = tmp.path().join("cache");
         let source = tmp.path().join("source").join("code-design");
         write_skill_dir(&source, "code-design");
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_failure_keeps_existing_cache() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path().join("cache");
         let existing_skill = cache
             .join("bundles")
@@ -794,7 +794,7 @@ mod tests {
             return;
         };
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let bundle = bundle_with(
             SourceSpec::default(),
             &[(
@@ -823,7 +823,7 @@ mod tests {
     fn test_assemble_bundle_pulls_whole_local_bundle_source() {
         // Point a bundle at a local bundle directory; every skill under its
         // skills/ folder is pulled as a unit, with no explicit entries.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let src = tmp
             .path()
             .join("agent-skills")
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_pulls_whole_git_bundle_source() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let repo = tmp.path().join("agent-skills");
         write_skill_dir(
             &repo
@@ -920,7 +920,7 @@ mod tests {
     fn test_assemble_bundle_source_plus_explicit_skill_overrides() {
         // Layer explicit skills over a whole-bundle source: an extra skill is
         // added, and a same-named skill overrides the one from the source.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let src = tmp.path().join("bundle");
         write_skill_dir(&src.join("skills").join("shared"), "from-source");
 
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_rejects_url_bundle_source() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let bundle = bundle_with(
             SourceSpec {
                 url: Some("https://example.com/SKILL.md".to_string()),
@@ -981,7 +981,7 @@ mod tests {
     #[test]
     fn test_assemble_bundle_git_skill_defaults_to_repo_root() {
         // A git skill without `path` resolves to the repo root as the skill dir.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let repo = tmp.path().join("single-skill-repo");
         write_skill_dir(&repo, "solo");
         init_git_repo(&repo);
@@ -1013,7 +1013,7 @@ mod tests {
             return;
         };
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let dest = tmp.path().join("SKILL.md");
 
         let result = download_skill(&url, &dest);
@@ -1068,7 +1068,7 @@ mod tests {
             result
         }
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let origin = temp.path().join("origin");
         write_skill_dir(&origin, "fixture");
         init_git_repo(&origin);
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn url_cache_names_are_opaque_and_bounded_for_signed_urls() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         for credential in [
             "credential-marker".to_string(),
             "credential-marker".repeat(30),
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_fetch_git_repo_reports_failed_pull() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let source_repo = tmp.path().join("source");
         write_skill_dir(&source_repo, "source");
         init_git_repo(&source_repo);
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_uses_git_skill_path() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let source_repo = tmp.path().join("source");
         write_skill_dir(
             &source_repo
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn test_assemble_bundle_rejects_invalid_skill_sources() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let bundle = bundle_with(
             SourceSpec::default(),
             &[(

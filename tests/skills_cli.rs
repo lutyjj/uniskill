@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -7,7 +9,7 @@ struct Fixture(tempfile::TempDir);
 
 impl Fixture {
     fn new() -> Self {
-        let f = Self(tempfile::tempdir().unwrap());
+        let f = Self(support::tempdir().unwrap());
         fs::create_dir_all(f.path("home")).unwrap();
         f
     }

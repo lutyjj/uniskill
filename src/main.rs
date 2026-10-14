@@ -15,6 +15,10 @@ mod state;
 mod sync;
 mod worktree;
 
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
 fn main() {
     match cli::run() {
         Ok(()) => {}

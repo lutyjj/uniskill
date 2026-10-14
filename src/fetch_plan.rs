@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn distinct_downloads_overlap_and_duplicate_urls_fetch_once() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let address = server.server_addr();
         let gate = Arc::new((Mutex::new(0usize), Condvar::new()));

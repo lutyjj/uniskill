@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::process::Command;
 
@@ -10,7 +12,7 @@ fn publication_requires_a_matching_annotated_tag_on_the_built_commit() {
         "different-commit",
         "valid",
     ] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = support::tempdir().unwrap();
         let command = |program: &str| {
             let mut command = Command::new(program);
             command

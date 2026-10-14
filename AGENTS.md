@@ -86,6 +86,9 @@ only in `src/harnesses.toml`.
 
 ## Write meaningful tests
 
+Build filesystem fixtures with `tests/support/mod.rs`; add explicit symlinks for
+alias cases.
+
 Tests should prove behavior, ownership, and failure modes. Add regression tests
 for any change that affects:
 

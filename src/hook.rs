@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn install_local_refuses_to_clobber_foreign_hook() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let hooks = tmp.path();
         let target = hooks.join("post-checkout");
         let foreign = "#!/bin/sh\necho mine\n";
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn install_local_writes_managed_hook_when_absent() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let hooks = tmp.path();
 
         install_local_at(hooks, "'uniskill' sync --worktree").unwrap();
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn install_local_refreshes_its_own_hook() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let hooks = tmp.path();
 
         install_local_at(hooks, "'uniskill' sync --worktree").unwrap();

@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn concurrent_edit_rolls_back_prior_writes_and_preserves_the_editor() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let state = temp.path().join("state");
         fs::create_dir_all(&state).unwrap();
         let a = temp.path().join("a");
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn interrupted_commit_restores_native_file_and_ownership_state() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let state = temp.path();
         let target = state.join("native");
         let manifest = state.join("state.json");

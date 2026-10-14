@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_manifest_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path();
         let manifest = Manifest {
             links: vec![ManagedLink {
@@ -136,13 +136,13 @@ mod tests {
 
     #[test]
     fn test_missing_manifest_loads_empty() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         assert!(Manifest::load(tmp.path()).unwrap().links.is_empty());
     }
 
     #[test]
     fn test_is_managed_symlink_only_true_for_cache_links() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path().join("cache");
         fs::create_dir_all(cache.join("bundles")).unwrap();
 
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_remove_if_managed_leaves_foreign_paths() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path().join("cache");
         fs::create_dir_all(&cache).unwrap();
 
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn ownership_resolves_cache_aliases_and_relative_targets_without_following_live_skills() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let cache = temp.path().join("cache");
         fs::create_dir_all(cache.join("skills")).unwrap();
         let alias = temp.path().join("alias");

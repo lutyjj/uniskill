@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn detect_distinguishes_main_and_linked_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let main = tmp.path().join("repo");
         std::fs::create_dir_all(&main).unwrap();
         git(&main, &["init", "-q"]);
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn detect_returns_none_outside_git() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         assert_eq!(WorktreeContext::detect(tmp.path()), None);
     }
 }

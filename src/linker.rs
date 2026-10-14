@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn failed_replacement_retains_the_existing_link() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         let parent = temp.path().join("target");
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_create_and_verify_symlink() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let source = tmp.path().join("source");
         let target = tmp.path().join("link");
 
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_update_wrong_symlink() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let correct_source = tmp.path().join("correct");
         let wrong_target_path = tmp.path().join("wrong_source");
         let target_link = tmp.path().join("link");
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_broken_symlink_replacement_is_updated() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let new_source = tmp.path().join("new_source");
         let target_link = tmp.path().join("link");
 
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_conflict_with_existing_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let source = tmp.path().join("source");
         let target = tmp.path().join("link");
 
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_broken_source_returns_broken() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::tempdir().unwrap();
         let non_existent_source = tmp.path().join("gone");
         let target = tmp.path().join("link");
 

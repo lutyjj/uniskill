@@ -1,3 +1,5 @@
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -11,7 +13,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(text: &str) -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = support::tempdir().unwrap();
         let config = temp.path().join("config.toml");
         fs::write(&config, text).unwrap();
         Self { temp, config }
@@ -625,7 +627,7 @@ fn separate_project_writers_and_recovery_share_the_native_destination_lock() {
     use std::fs::{File, TryLockError};
     use std::time::{Duration, Instant};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = support::tempdir().unwrap();
     let home = temp.path().join("home");
     fs::create_dir(&home).unwrap();
     let native = home.join(".claude.json");

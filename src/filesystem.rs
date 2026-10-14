@@ -154,7 +154,7 @@ mod tests {
     use super::*;
     #[test]
     fn destination_identity_resolves_symlink_parents_before_parent_components() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let physical = temp.path().join("physical");
         std::fs::create_dir_all(physical.join("child")).unwrap();
         let alias = temp.path().join("alias");
