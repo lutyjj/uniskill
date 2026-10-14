@@ -432,12 +432,25 @@ pub(crate) fn destination_path(path: &Path) -> anyhow::Result<PathBuf> {
     let name = absolute
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("destination requires a file name"))?;
+    let parent = directory_path(absolute.parent().expect("absolute path has parent"))?;
+    Ok(parent.path.join(name))
+}
+
+/// A directory's physical location and every symlink entry used to reach it.
+pub(crate) struct DirectoryPath {
+    pub path: PathBuf,
+    pub aliases: std::collections::BTreeSet<PathBuf>,
+}
+
+pub(crate) fn directory_path(path: &Path) -> anyhow::Result<DirectoryPath> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
     let mut parent = PathBuf::new();
-    for component in absolute
-        .parent()
-        .expect("absolute path has parent")
-        .components()
-    {
+    let mut aliases = std::collections::BTreeSet::new();
+    for component in absolute.components() {
         match component {
             std::path::Component::ParentDir => {
                 parent.pop();
@@ -447,7 +460,19 @@ pub(crate) fn destination_path(path: &Path) -> anyhow::Result<PathBuf> {
                 parent.push(component.as_os_str());
                 match std::fs::symlink_metadata(&parent) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
-                        parent = parent.canonicalize()?;
+                        // Validate the complete chain before recursively retaining its entries.
+                        // This also rejects cycles and dangling directory aliases.
+                        parent.canonicalize()?;
+                        aliases.insert(parent.clone());
+                        let target = std::fs::read_link(&parent)?;
+                        let target = if target.is_absolute() {
+                            target
+                        } else {
+                            parent.parent().expect("symlink has parent").join(target)
+                        };
+                        let resolved = directory_path(&target)?;
+                        parent = resolved.path;
+                        aliases.extend(resolved.aliases);
                     }
                     Ok(metadata) if !metadata.is_dir() => anyhow::bail!(
                         "destination parent is not a directory: {}",
@@ -460,7 +485,10 @@ pub(crate) fn destination_path(path: &Path) -> anyhow::Result<PathBuf> {
             }
         }
     }
-    Ok(parent.join(name))
+    Ok(DirectoryPath {
+        path: parent,
+        aliases,
+    })
 }
 
 pub(crate) fn anchor_bundle_paths(bundle: &mut Bundle, base: &Path) {

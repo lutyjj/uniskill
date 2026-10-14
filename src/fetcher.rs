@@ -32,20 +32,19 @@ pub fn assemble_bundle(
 }
 
 pub struct StagedBundle {
-    pub staged: PathBuf,
-    pub published: PathBuf,
+    pub paths: crate::cache::BundlePaths,
 }
 
 impl StagedBundle {
     pub fn publish(self) -> Result<PathBuf> {
-        replace_bundle_cache(&self.staged, &self.published)?;
-        Ok(self.published.clone())
+        replace_bundle_cache(&self.paths)?;
+        Ok(self.paths.published.clone())
     }
 }
 
 impl Drop for StagedBundle {
     fn drop(&mut self) {
-        let _ = remove_existing(&self.staged);
+        let _ = remove_existing(&self.paths.staging);
     }
 }
 
@@ -56,11 +55,10 @@ pub fn stage_bundle(
     prepared: &crate::fetch_plan::Prepared,
 ) -> Result<StagedBundle> {
     validate_bundle(bundle)?;
-    let bundle_root = crate::cache::Layout::resolve(cache_dir)?.bundle(bundle_name)?;
-    recover_bundle_cache(&bundle_root)?;
-    let staging_root = sibling_cache_path(&bundle_root, "staging")?;
-    let skills_dir = staging_root.join("skills");
-    remove_existing(&staging_root)?;
+    let paths = crate::cache::Layout::resolve(cache_dir)?.bundle(bundle_name)?;
+    recover_bundle_cache(&paths)?;
+    let skills_dir = paths.staging.join("skills");
+    remove_existing(&paths.staging)?;
     fs::create_dir_all(&skills_dir)
         .with_context(|| format!("failed to create bundle cache at {}", skills_dir.display()))?;
 
@@ -86,10 +84,7 @@ pub fn stage_bundle(
         materialize_skill(skill_name, &source, &dest, bundle.link, prepared)?;
     }
 
-    Ok(StagedBundle {
-        staged: staging_root,
-        published: bundle_root,
-    })
+    Ok(StagedBundle { paths })
 }
 
 pub(crate) fn validate_bundle(bundle: &Bundle) -> Result<()> {
@@ -163,17 +158,19 @@ fn same_tree(left: &Path, right: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
-    recover_bundle_cache(bundle_root)?;
+fn replace_bundle_cache(paths: &crate::cache::BundlePaths) -> Result<()> {
+    let staging_root = &paths.staging;
+    let bundle_root = &paths.published;
+    let backup_root = &paths.previous;
+    recover_bundle_cache(paths)?;
     if same_tree(staging_root, bundle_root)? {
         return remove_existing(staging_root);
     }
-    let backup_root = sibling_cache_path(bundle_root, "previous")?;
-    remove_existing(&backup_root)?;
+    remove_existing(backup_root)?;
 
     let had_existing = fs::symlink_metadata(bundle_root).is_ok();
     if had_existing {
-        fs::rename(bundle_root, &backup_root).with_context(|| {
+        fs::rename(bundle_root, backup_root).with_context(|| {
             format!(
                 "failed to move existing bundle cache {} aside",
                 bundle_root.display()
@@ -183,12 +180,12 @@ fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
 
     match fs::rename(staging_root, bundle_root) {
         Ok(()) => {
-            remove_existing(&backup_root)?;
+            remove_existing(backup_root)?;
             Ok(())
         }
         Err(err) => {
             if had_existing {
-                let _ = fs::rename(&backup_root, bundle_root);
+                let _ = fs::rename(backup_root, bundle_root);
             }
             Err(err).with_context(|| {
                 format!(
@@ -203,33 +200,20 @@ fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
 
 /// Restore the published path before source checks or worktree readers use it.
 /// The caller holds the cache lock; a remaining staging tree is disposable.
-pub(crate) fn recover_bundle_cache(bundle_root: &Path) -> Result<()> {
-    let backup = sibling_cache_path(bundle_root, "previous")?;
+pub(crate) fn recover_bundle_cache(paths: &crate::cache::BundlePaths) -> Result<()> {
+    let bundle_root = &paths.published;
+    let backup = &paths.previous;
     match fs::symlink_metadata(bundle_root) {
-        Ok(_) => remove_existing(&backup),
+        Ok(_) => remove_existing(backup),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match fs::symlink_metadata(&backup) {
-                Ok(_) => fs::rename(&backup, bundle_root).context("failed to restore bundle cache"),
+            match fs::symlink_metadata(backup) {
+                Ok(_) => fs::rename(backup, bundle_root).context("failed to restore bundle cache"),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error.into()),
             }
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn sibling_cache_path(path: &Path, suffix: &str) -> Result<PathBuf> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("cache path has no file name: {}", path.display()))?
-        .to_string_lossy();
-    let component = format!(".{name}.{suffix}");
-    if component.len() <= 255 {
-        return Ok(path.with_file_name(component));
-    }
-    use sha2::{Digest, Sha256};
-    // Double-dot names cannot collide with the non-hidden public bundle keys.
-    Ok(path.with_file_name(format!("..{:x}.{suffix}", Sha256::digest(name.as_bytes()))))
 }
 
 /// Resolve a skill's source spec, requiring exactly one source to be declared.
@@ -651,7 +635,11 @@ mod tests {
             let root = assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
             fs::write(source.join("skills/demo/SKILL.md"), "updated").unwrap();
             assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
-            let backup = sibling_cache_path(&root, "previous").unwrap();
+            let backup = crate::cache::Layout::resolve(&cache)
+                .unwrap()
+                .bundle(&name)
+                .unwrap()
+                .previous;
             assert!(backup.file_name().unwrap().len() <= 255);
             fs::rename(&root, &backup).unwrap();
             fs::remove_dir_all(&source).unwrap();

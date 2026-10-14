@@ -269,10 +269,19 @@ Missing directories retain reservations from their existing symlink chains.
 
 `cache::Layout` resolves the cache root and bundles storage directory before
 deriving publication paths. Staging, worktree readers, recovery, and pruning share
-that layout, so directory aliases retain one storage identity. Ownership checks
-preserve the final skill entry when it links to a live source. Keeping layout
+that layout, so directory aliases retain one storage identity. The layout also
+reserves storage directories and every alias used to reach them, including aliases
+in parent directories. Skill destinations cannot overlap those reservations.
+Loaded ownership cannot authorize pruning a storage alias. Worktree state storage
+has the same protection, including when its directory is aliased inside the checkout.
+Ownership checks preserve the final skill entry when it links to a live source. Keeping layout
 separate from materialization lets ownership checks use storage identity without
 depending on source-fetching code.
+
+`cache::BundlePaths` owns publication, staging, and backup paths. Both sync modes
+check recorded entries against those paths before recovery or assembly can remove
+anything. Conflicting bundles wait while failed owners retain their links; removing
+the former owner lets ordinary pruning retire the claim before the next apply.
 
 Applied artifacts and ownership manifests remain unchanged on a converged
 sync. Temporary staging and mutable remote Git metadata can change during

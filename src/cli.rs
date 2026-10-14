@@ -142,11 +142,8 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
     let inputs = worktree_inputs(explicit_config, &ctx)?;
     // Keep the worktree's manifest in the worktree itself: scoped so a main sync
     // never prunes these links, and self-cleaning when the worktree is removed.
-    let state_path = ctx.destination(&ctx.worktree_root.join(".uniskill-cache/state.toml"))?;
-    let state_dir = state_path
-        .parent()
-        .expect("state file has parent")
-        .to_path_buf();
+    let state_dir = ctx.worktree_root.join(".uniskill-cache");
+    ctx.destination(&state_dir.join("state.toml"))?;
 
     let mcp_report = if options.check {
         mcp::check(

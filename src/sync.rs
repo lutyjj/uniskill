@@ -114,8 +114,15 @@ fn begin(
     cache: &Path,
     state_dir: &Path,
     worktree: Option<&worktree::WorktreeContext>,
-) -> Result<(std::fs::File, PathBuf, state::Manifest)> {
+) -> Result<(
+    std::fs::File,
+    PathBuf,
+    state::Manifest,
+    crate::cache::Layout,
+)> {
     let lock = state::lock(cache)?;
+    let mut layout = crate::cache::Layout::resolve(cache)?;
+    layout.reserve_directory(state_dir)?;
     let cache = cache.canonicalize()?;
     if let Some(ctx) = worktree {
         ctx.destination(&state_dir.join("state.toml"))?;
@@ -127,9 +134,15 @@ fn begin(
             Some(ctx) => ctx.destination(declared)?,
             None => config::destination_path(declared)?,
         };
+        if layout.protects_alias(&path) {
+            bail!(
+                "skill ownership overlaps a cache storage alias: {}",
+                path.display()
+            );
+        }
         owner.path = path.to_string_lossy().into_owned();
     }
-    Ok((lock, cache, previous))
+    Ok((lock, cache, previous, layout))
 }
 
 fn bundle_failure(
@@ -144,6 +157,26 @@ fn bundle_failure(
         bundle: bundle.into(),
         error: format!("{error:#}"),
     });
+}
+
+/// Existing harness entries must retire before cache lifecycle mutation begins.
+fn bundle_paths(
+    layout: &crate::cache::Layout,
+    name: &str,
+    previous: &state::Manifest,
+) -> Result<crate::cache::BundlePaths> {
+    let paths = layout.bundle(name)?;
+    if let Some(owner) = previous
+        .links
+        .iter()
+        .find(|owner| paths.overlaps(Path::new(&owner.path)))
+    {
+        bail!(
+            "bundle cache lifecycle overlaps existing ownership at {}",
+            owner.path
+        );
+    }
+    Ok(paths)
 }
 
 struct Destination {
@@ -258,6 +291,7 @@ fn plan_bundle(
 
 fn select_routes(
     routes: Routes,
+    layout: &crate::cache::Layout,
     previous: &state::Manifest,
     configured: &HashMap<String, config::Bundle>,
     failed: &mut BTreeSet<String>,
@@ -285,9 +319,10 @@ fn select_routes(
     }
     for (path, candidates) in &routes {
         let mut blocked = BTreeSet::new();
-        if candidates
-            .iter()
-            .any(|route| route.source != candidates[0].source)
+        if layout.conflicts(path)
+            || candidates
+                .iter()
+                .any(|route| route.source != candidates[0].source)
         {
             blocked.extend(candidates.iter().map(|r| r.owner.bundle.clone()));
         }
@@ -413,7 +448,7 @@ pub fn sync_with_progress(
     jobs: usize,
     progress: &mut impl FnMut(fetch_plan::Progress),
 ) -> SyncReport {
-    let (_lock, cache, previous) = match begin(cache_dir, state_dir, None) {
+    let (_lock, cache, previous, layout) = match begin(cache_dir, state_dir, None) {
         Ok(inputs) => inputs,
         Err(error) => return state_failure(error),
     };
@@ -422,8 +457,7 @@ pub fn sync_with_progress(
     let mut eligible = HashMap::new();
     let mut targets = BTreeMap::new();
     for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
-        let checked = crate::cache::Layout::resolve(&cache)
-            .and_then(|layout| layout.bundle(name))
+        let checked = bundle_paths(&layout, name, &previous)
             .and_then(|root| fetcher::recover_bundle_cache(&root))
             .and_then(|_| destinations(bundle, registry, None));
         match checked {
@@ -446,8 +480,8 @@ pub fn sync_with_progress(
                 plan_bundle(
                     &mut routes,
                     &name,
-                    &bundle.staged.join("skills"),
-                    &bundle.published,
+                    &bundle.paths.staging.join("skills"),
+                    &bundle.paths.published,
                     &destinations,
                     None,
                 )?;
@@ -460,7 +494,14 @@ pub fn sync_with_progress(
             Err(error) => bundle_failure(&mut report, &mut failed, &name, error),
         }
     }
-    let routes = match select_routes(routes, &previous, bundles, &mut failed, &mut report) {
+    let routes = match select_routes(
+        routes,
+        &layout,
+        &previous,
+        bundles,
+        &mut failed,
+        &mut report,
+    ) {
         Ok(routes) => routes,
         Err(error) => return state_failure(error),
     };
@@ -493,7 +534,7 @@ pub fn sync_worktree(
     state_dir: &Path,
     ctx: &worktree::WorktreeContext,
 ) -> SyncReport {
-    let (_lock, cache, previous) = match begin(cache_dir, state_dir, Some(ctx)) {
+    let (_lock, cache, previous, layout) = match begin(cache_dir, state_dir, Some(ctx)) {
         Ok(inputs) => inputs,
         Err(error) => return state_failure(error),
     };
@@ -501,28 +542,33 @@ pub fn sync_worktree(
     let mut failed = BTreeSet::new();
     let mut routes = Routes::new();
     for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
-        let result = crate::cache::Layout::resolve(&cache)
-            .and_then(|layout| layout.bundle(name))
-            .and_then(|published| {
-                let destinations = destinations(bundle, registry, Some(ctx))?;
-                if destinations.is_empty() {
-                    return Ok(());
-                }
-                fetcher::recover_bundle_cache(&published)?;
-                plan_bundle(
-                    &mut routes,
-                    name,
-                    &published.join("skills"),
-                    &published,
-                    &destinations,
-                    Some(ctx),
-                )
-            });
+        let result = destinations(bundle, registry, Some(ctx)).and_then(|destinations| {
+            if destinations.is_empty() {
+                return Ok(());
+            }
+            let paths = bundle_paths(&layout, name, &previous)?;
+            fetcher::recover_bundle_cache(&paths)?;
+            plan_bundle(
+                &mut routes,
+                name,
+                &paths.published.join("skills"),
+                &paths.published,
+                &destinations,
+                Some(ctx),
+            )
+        });
         if let Err(error) = result {
             bundle_failure(&mut report, &mut failed, name, error);
         }
     }
-    let routes = match select_routes(routes, &previous, bundles, &mut failed, &mut report) {
+    let routes = match select_routes(
+        routes,
+        &layout,
+        &previous,
+        bundles,
+        &mut failed,
+        &mut report,
+    ) {
         Ok(routes) => routes,
         Err(error) => return state_failure(error),
     };
