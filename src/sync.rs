@@ -71,10 +71,45 @@ fn state_failure(error: anyhow::Error) -> SyncReport {
     }
 }
 
-fn begin(cache: &Path, state_dir: &Path) -> Result<(std::fs::File, PathBuf, state::Manifest)> {
+struct PriorLink {
+    owner: state::ManagedLink,
+    ancestors: BTreeSet<PathBuf>,
+}
+
+fn ancestor_destinations(path: &Path) -> Result<BTreeSet<PathBuf>> {
+    path.ancestors()
+        .skip(1)
+        .filter(|parent| parent.file_name().is_some())
+        .map(config::destination_path)
+        .collect()
+}
+
+fn begin(
+    cache: &Path,
+    state_dir: &Path,
+    worktree: Option<&worktree::WorktreeContext>,
+) -> Result<(std::fs::File, PathBuf, Vec<PriorLink>)> {
     let lock = state::lock(cache)?;
     let cache = cache.canonicalize()?;
-    let previous = state::Manifest::load(state_dir)?;
+    if let Some(ctx) = worktree {
+        ctx.destination(&state_dir.join("state.toml"))?;
+    }
+    let previous = state::Manifest::load(state_dir)?
+        .links
+        .into_iter()
+        .map(|mut owner| {
+            let declared = PathBuf::from(&owner.path);
+            let path = match worktree {
+                Some(ctx) => ctx.destination(&declared)?,
+                None => config::destination_path(&declared)?,
+            };
+            owner.path = path.to_string_lossy().into_owned();
+            Ok(PriorLink {
+                owner,
+                ancestors: ancestor_destinations(&declared)?,
+            })
+        })
+        .collect::<Result<_>>()?;
     Ok((lock, cache, previous))
 }
 
@@ -138,6 +173,7 @@ struct Route {
     source: PathBuf,
     owner: state::ManagedLink,
     label: String,
+    ancestors: BTreeSet<PathBuf>,
 }
 
 type Routes = BTreeMap<PathBuf, Vec<Route>>;
@@ -148,6 +184,7 @@ fn plan_bundle(
     skills: &Path,
     published: &Path,
     destinations: &[Destination],
+    worktree: Option<&worktree::WorktreeContext>,
 ) -> Result<()> {
     let mut planned = Vec::new();
     for entry in
@@ -163,9 +200,11 @@ fn plan_bundle(
             .map_err(|_| anyhow::anyhow!("skill names must be UTF-8"))?;
         config::validate_component(&skill)?;
         for destination in destinations {
-            let path = config::destination_path(Path::new(
-                &destination.pattern.replace("{name}", &skill),
-            ))?;
+            let declared = PathBuf::from(destination.pattern.replace("{name}", &skill));
+            let path = match worktree {
+                Some(ctx) => ctx.destination(&declared)?,
+                None => config::destination_path(&declared)?,
+            };
             let owner = state::ManagedLink {
                 path: path.to_string_lossy().into_owned(),
                 skill: skill.clone(),
@@ -178,6 +217,7 @@ fn plan_bundle(
                     source: published.join("skills").join(&skill),
                     owner,
                     label: destination.label.clone(),
+                    ancestors: ancestor_destinations(&declared)?,
                 },
             ));
         }
@@ -190,20 +230,76 @@ fn plan_bundle(
 
 fn select_routes(
     routes: Routes,
+    previous: &[PriorLink],
+    configured: &HashMap<String, config::Bundle>,
     failed: &mut BTreeSet<String>,
     report: &mut SyncReport,
 ) -> BTreeMap<PathBuf, Route> {
+    let mut descendants = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    for candidates in routes.values() {
+        for route in candidates {
+            for parent in &route.ancestors {
+                descendants
+                    .entry(parent.clone())
+                    .or_default()
+                    .insert(route.owner.bundle.clone());
+            }
+        }
+    }
     for (path, candidates) in &routes {
-        if candidates
+        let different = candidates
             .iter()
-            .any(|route| route.source != candidates[0].source)
-        {
-            for route in candidates {
+            .any(|route| route.source != candidates[0].source);
+        let nested = descendants.get(path);
+        if different || nested.is_some() {
+            let bundles: BTreeSet<_> = candidates
+                .iter()
+                .map(|r| r.owner.bundle.clone())
+                .chain(nested.into_iter().flatten().cloned())
+                .collect();
+            for bundle in bundles {
+                if !failed.contains(&bundle) {
+                    bundle_failure(
+                        report,
+                        failed,
+                        &bundle,
+                        anyhow::anyhow!(
+                            "overlapping or conflicting skill routes at {}",
+                            path.display()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    for old in previous {
+        let root = PathBuf::from(&old.owner.path);
+        let mut blocked = descendants.get(&root).cloned().unwrap_or_default();
+        for path in &old.ancestors {
+            if let Some(candidates) = routes.get(path) {
+                blocked.extend(candidates.iter().map(|r| r.owner.bundle.clone()));
+            }
+        }
+        if configured.contains_key(&old.owner.bundle) {
+            if let Some(candidates) = routes.get(&root) {
+                blocked.extend(
+                    candidates
+                        .iter()
+                        .filter(|r| r.owner.bundle != old.owner.bundle)
+                        .map(|r| r.owner.bundle.clone()),
+                );
+            }
+        }
+        for bundle in blocked {
+            if !failed.contains(&bundle) {
                 bundle_failure(
                     report,
                     failed,
-                    &route.owner.bundle,
-                    anyhow::anyhow!("conflicting skill routes at {}", path.display()),
+                    &bundle,
+                    anyhow::anyhow!(
+                        "skill destination overlaps existing ownership at {}",
+                        root.display()
+                    ),
                 );
             }
         }
@@ -213,8 +309,8 @@ fn select_routes(
         .filter_map(|(path, candidates)| {
             candidates
                 .into_iter()
-                .find(|route| !failed.contains(&route.owner.bundle))
-                .map(|route| (path, route))
+                .find(|r| !failed.contains(&r.owner.bundle))
+                .map(|r| (path, r))
         })
         .collect()
 }
@@ -222,18 +318,17 @@ fn select_routes(
 /// Retain a durable ownership superset until link application and pruning finish.
 /// Every intermediate state can be reconciled by the next ordinary sync.
 fn save_intent(
-    previous: &state::Manifest,
+    previous: &[PriorLink],
     routes: &BTreeMap<PathBuf, Route>,
     state_dir: &Path,
 ) -> Result<()> {
     let mut owned = BTreeMap::new();
     for link in previous
-        .links
         .iter()
-        .cloned()
+        .map(|prior| prior.owner.clone())
         .chain(routes.values().map(|r| r.owner.clone()))
     {
-        owned.insert(link.path.clone(), link);
+        owned.insert((link.path.clone(), link.bundle.clone()), link);
     }
     state::Manifest {
         links: owned.into_values().collect(),
@@ -264,7 +359,7 @@ pub fn sync_with_progress(
     jobs: usize,
     progress: &mut impl FnMut(fetch_plan::Progress),
 ) -> SyncReport {
-    let (_lock, cache, previous) = match begin(cache_dir, state_dir) {
+    let (_lock, cache, previous) = match begin(cache_dir, state_dir, None) {
         Ok(inputs) => inputs,
         Err(error) => return state_failure(error),
     };
@@ -299,6 +394,7 @@ pub fn sync_with_progress(
                     &bundle.staged.join("skills"),
                     &bundle.published,
                     &destinations,
+                    None,
                 )?;
                 Ok(bundle)
             });
@@ -309,7 +405,7 @@ pub fn sync_with_progress(
             Err(error) => bundle_failure(&mut report, &mut failed, &name, error),
         }
     }
-    let mut routes = select_routes(routes, &mut failed, &mut report);
+    let routes = select_routes(routes, &previous, bundles, &mut failed, &mut report);
     if let Err(error) = save_intent(&previous, &routes, state_dir) {
         return state_failure(error);
     }
@@ -321,7 +417,6 @@ pub fn sync_with_progress(
             bundle_failure(&mut report, &mut failed, &name, error);
         }
     }
-    routes.retain(|_, route| !failed.contains(&route.owner.bundle));
     for name in bundles.keys().collect::<BTreeSet<_>>() {
         if !failed.contains(name) {
             progress(fetch_plan::Progress::Linking {
@@ -340,7 +435,7 @@ pub fn sync_worktree(
     state_dir: &Path,
     ctx: &worktree::WorktreeContext,
 ) -> SyncReport {
-    let (_lock, cache, previous) = match begin(cache_dir, state_dir) {
+    let (_lock, cache, previous) = match begin(cache_dir, state_dir, Some(ctx)) {
         Ok(inputs) => inputs,
         Err(error) => return state_failure(error),
     };
@@ -362,13 +457,14 @@ pub fn sync_worktree(
                     &published.join("skills"),
                     &published,
                     &destinations,
+                    Some(ctx),
                 )
             });
         if let Err(error) = result {
             bundle_failure(&mut report, &mut failed, name, error);
         }
     }
-    let routes = select_routes(routes, &mut failed, &mut report);
+    let routes = select_routes(routes, &previous, bundles, &mut failed, &mut report);
     if let Err(error) = save_intent(&previous, &routes, state_dir) {
         return state_failure(error);
     }
@@ -377,14 +473,19 @@ pub fn sync_worktree(
 
 fn apply_routes(
     mut report: SyncReport,
-    previous: &state::Manifest,
+    previous: &[PriorLink],
     routes: BTreeMap<PathBuf, Route>,
     mut failed: BTreeSet<String>,
     cache: &Path,
     state_dir: &Path,
 ) -> SyncReport {
     let mut managed = Vec::new();
+    let mut failed_paths = HashSet::new();
     for (path, route) in routes {
+        if failed.contains(&route.owner.bundle) {
+            failed_paths.insert(route.owner.path);
+            continue;
+        }
         let result = linker::ensure_skill_symlink(&route.source, &path);
         match &result.status {
             linker::SyncStatus::Ok => report.summary.ok += 1,
@@ -393,10 +494,12 @@ fn apply_routes(
             linker::SyncStatus::Broken => {
                 report.summary.broken += 1;
                 failed.insert(route.owner.bundle.clone());
+                failed_paths.insert(route.owner.path.clone());
             }
             linker::SyncStatus::Conflict(_) => {
                 report.summary.conflicts += 1;
                 failed.insert(route.owner.bundle.clone());
+                failed_paths.insert(route.owner.path.clone());
             }
         }
         if matches!(
@@ -413,12 +516,21 @@ fn apply_routes(
         });
     }
     let current: HashSet<_> = managed.iter().map(|link| link.path.clone()).collect();
-    for old in &previous.links {
+    let retained: HashSet<_> = previous
+        .iter()
+        .filter(|prior| failed.contains(&prior.owner.bundle))
+        .map(|prior| &prior.owner.path)
+        .collect();
+    for prior in previous {
+        let old = &prior.owner;
         if current.contains(&old.path) {
             continue;
         }
-        if failed.contains(&old.bundle) {
+        if failed.contains(&old.bundle) || failed_paths.contains(&old.path) {
             managed.push(old.clone());
+            continue;
+        }
+        if retained.contains(&old.path) {
             continue;
         }
         match state::remove_if_managed(Path::new(&old.path), cache) {
@@ -442,7 +554,7 @@ fn apply_routes(
     }
     let managed: BTreeMap<_, _> = managed
         .into_iter()
-        .map(|link| (link.path.clone(), link))
+        .map(|link| ((link.path.clone(), link.bundle.clone()), link))
         .collect();
     if let Err(error) = (state::Manifest {
         links: managed.into_values().collect(),
@@ -524,6 +636,7 @@ mod tests {
         let source = temp.path().join("source");
         let main = temp.path().join("main");
         let linked = temp.path().join("linked");
+        fs::create_dir_all(&linked).unwrap();
         let state_dir = linked.join(".uniskill-cache");
         let ctx = worktree::WorktreeContext {
             main_root: main.clone(),

@@ -67,7 +67,7 @@ pub fn check(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
-    let state_dir = config::destination_path(&state_dir.join("mcp"))?;
+    let state_dir = state_directory(state_dir, worktree)?;
     if transaction::pending(&state_dir) {
         bail!("interrupted MCP transaction; run sync to recover before checking");
     }
@@ -87,7 +87,7 @@ pub fn sync(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
-    let state_dir = config::destination_path(&state_dir.join("mcp"))?;
+    let state_dir = state_directory(state_dir, worktree)?;
     let desired = desired_entries(servers, registry, worktree)?;
     if desired.is_empty() && !state_dir.exists() {
         return Ok(Report::default());
@@ -111,12 +111,26 @@ pub fn sync(
             paths.insert(path);
         }
     }
+    if let Some(ctx) = worktree {
+        for path in &paths {
+            ctx.destination(path)?;
+        }
+    }
     let _destinations = transaction::lock_destinations(&paths)?;
     let preserved = transaction::recover(&state_dir)?;
     let mut plan = plan(desired, &state_dir, worktree, adopt)?;
     transaction::commit(&state_dir, plan.updates)?;
     plan.report.preserved = preserved;
     Ok(plan.report)
+}
+
+fn state_directory(base: &Path, worktree: Option<&WorktreeContext>) -> Result<PathBuf> {
+    let file = base.join("mcp/state.json");
+    let file = match worktree {
+        Some(ctx) => ctx.destination(&file)?,
+        None => config::destination_path(&file)?,
+    };
+    Ok(file.parent().expect("state file has parent").to_path_buf())
 }
 
 fn fingerprint(value: &Value) -> Result<String> {
@@ -162,7 +176,7 @@ fn desired_entries(
             let path = config::destination_path(Path::new(&target.path))?;
             let path = match worktree {
                 Some(ctx) => match ctx.retarget(&path.to_string_lossy()) {
-                    Some(path) => PathBuf::from(path),
+                    Some(path) => ctx.destination(Path::new(&path))?,
                     None => continue,
                 },
                 None => path,
@@ -256,8 +270,8 @@ fn plan(
         if identity.path.starts_with(state_dir) {
             bail!("MCP target overlaps its ownership state directory");
         }
-        if worktree.is_some_and(|ctx| !identity.path.starts_with(&ctx.worktree_root)) {
-            bail!("worktree MCP ownership contains a target outside its checkout");
+        if let Some(ctx) = worktree {
+            ctx.destination(&identity.path)?;
         }
         let wanted = desired.get(&identity);
         let old = owned.get(&identity);

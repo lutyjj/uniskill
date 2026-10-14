@@ -58,9 +58,7 @@ pub fn stage_bundle(
     validate_bundle(bundle)?;
     let bundle_root = cache_dir.join("bundles").join(bundle_name);
     recover_bundle_cache(&bundle_root)?;
-    let staging_root = cache_dir
-        .join("bundles")
-        .join(format!(".{bundle_name}.staging"));
+    let staging_root = sibling_cache_path(&bundle_root, "staging")?;
     let skills_dir = staging_root.join("skills");
     remove_existing(&staging_root)?;
     fs::create_dir_all(&skills_dir)
@@ -225,7 +223,13 @@ fn sibling_cache_path(path: &Path, suffix: &str) -> Result<PathBuf> {
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("cache path has no file name: {}", path.display()))?
         .to_string_lossy();
-    Ok(path.with_file_name(format!(".{name}.{suffix}")))
+    let component = format!(".{name}.{suffix}");
+    if component.len() <= 255 {
+        return Ok(path.with_file_name(component));
+    }
+    use sha2::{Digest, Sha256};
+    // Double-dot names cannot collide with the non-hidden public bundle keys.
+    Ok(path.with_file_name(format!("..{:x}.{suffix}", Sha256::digest(name.as_bytes()))))
 }
 
 /// Resolve a skill's source spec, requiring exactly one source to be declared.
@@ -627,6 +631,38 @@ pub(crate) fn cache_url(url: &str, cache: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximum_length_bundle_keys_install_update_and_recover() {
+        for length in [245, 246, 255] {
+            let temp = tempfile::tempdir().unwrap();
+            let name = "a".repeat(length);
+            let source = temp.path().join("source");
+            write_skill_dir(&source.join("skills/demo"), "first");
+            let mut bundle = bundle_with(
+                SourceSpec {
+                    source: Some(source.to_string_lossy().into_owned()),
+                    ..SourceSpec::default()
+                },
+                &[],
+            );
+            bundle.link = false;
+            let cache = temp.path().join("cache");
+            let root = assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
+            fs::write(source.join("skills/demo/SKILL.md"), "updated").unwrap();
+            assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
+            let backup = sibling_cache_path(&root, "previous").unwrap();
+            assert!(backup.file_name().unwrap().len() <= 255);
+            fs::rename(&root, &backup).unwrap();
+            fs::remove_dir_all(&source).unwrap();
+            assert!(assemble_bundle(&name, &bundle, &cache, temp.path()).is_err());
+            assert_eq!(
+                fs::read_to_string(root.join("skills/demo/SKILL.md")).unwrap(),
+                "updated"
+            );
+            assert!(!backup.exists());
+        }
+    }
 
     fn normalized_repo(repo: &str) -> String {
         GitSource::new(repo, None).repo

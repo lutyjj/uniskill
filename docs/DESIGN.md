@@ -148,6 +148,9 @@ user config can override them.
 
 [src/harnesses.toml](../src/harnesses.toml) owns the built-in destinations.
 Custom harnesses may provide a skill pattern, an MCP target, or both.
+The registry resolves built-in paths only for destinations used by the config
+and not overridden by a custom definition. Unused defaults require no environment
+variables.
 
 ## Git worktrees
 
@@ -170,6 +173,10 @@ skills directory is already visible from every worktree. It never fetches, which
 keeps the hook fast and offline-safe; a bundle the main sync has not assembled
 yet is reported and skipped.
 
+Retargeted skill and MCP destinations must remain inside the physical worktree
+after resolving symlink parents. The same boundary applies to loaded ownership,
+transaction recovery, and state directories; an outside path fails the sync.
+
 ## Config resolution
 
 Global config is read from `~/.config/uniskill/config.toml`, unless `--config`
@@ -191,7 +198,8 @@ See [README.md](../README.md#environment-variables) for variable expansion.
 
 1. Load the built-in destination registry and resolve the config/includes.
 2. Validate and reconcile MCP entries as a separate journaled transaction.
-3. Lock the skill cache and load the previous link manifest.
+3. Lock the skill cache and load the previous link manifest. Normalize loaded
+   destinations with the same parent resolution used for planned routes.
 4. Validate bundle sources and skill destinations, and restore interrupted
    cache publications before downloading.
 5. Deduplicate remote sources and fetch them with bounded concurrency. Jobs
@@ -199,8 +207,9 @@ See [README.md](../README.md#environment-variables) for variable expansion.
 6. Stage bundles in sorted order. Local sources link live or copy according
    to `link`; explicit skills override whole-bundle entries by name.
 7. Plan every skill destination before publication. Equivalent routes to one
-   cache entry coalesce; competing cache entries fail their bundles and retain
-   the installed cache and links.
+   cache entry coalesce; competing entries and nested skill roots fail their
+   bundles before ownership writes or cache publication. Existing roots also
+   participate in overlap checks.
 8. Persist ownership intent for existing and planned links. Compare staged and
    published trees, retaining identical caches and publishing accepted changes.
 9. Reconcile each harness link once, preserve failed bundles' ownership, and
@@ -215,12 +224,14 @@ Skill reconciliation permits incremental progress across bundles. Its durable
 ownership intent is a conservative superset until application finishes, so an
 interrupted apply can reconcile or prune partially installed links on retry.
 Unreadable or malformed ownership state stops skill sync before cache or link
-mutation. State persistence failures return a failed sync.
+mutation. State persistence failures return a failed sync. Both ownership engines
+use bounded regular-file reads and reject symlinked state files.
 
 MCP requires a journal because it edits shared native documents and must restore
 their before-images. Skills retain their own cache/link lifecycle and share only
-atomic file replacement and destination path resolution with MCP. A transaction
-spanning caches and links would also need durable link and directory before-images;
+bounded reads, atomic file replacement, and destination path resolution with MCP.
+A transaction spanning caches and links would also need durable link and directory
+before-images;
 revisit that boundary if all-or-nothing skill application becomes a requirement.
 
 For a linked local source the harness symlink resolves through the cache entry
@@ -237,6 +248,14 @@ Pruning is deliberately conservative. A link is removed only when it is still a
 symlink pointing into uniskill's own cache, so hand-placed directories and
 foreign symlinks in a harness are never touched. A link whose bundle failed to
 build this run is kept, not pruned: a build error is a failure, not a removal.
+
+A configured bundle reserves its recorded destinations until it successfully
+retires those links. Another bundle cannot take them during that sync, including
+when the owner fails after planning. To hand off a destination in one apply,
+remove its former bundle from the config. If that bundle remains configured,
+first sync its removal of the skill, then sync the new owner. Nested destinations
+require the old root to be pruned before applying the new route, even within
+one bundle.
 
 Applied artifacts and ownership manifests remain unchanged on a converged
 sync. Temporary staging and mutable remote Git metadata can change during
@@ -268,6 +287,8 @@ Git repositories are cached separately under `cache/repos/`. One normalized
 repository/ref identity owns both download deduplication and checkout naming;
 an omitted ref is distinct from every explicit ref. Cache directories are
 derived data and may be rebuilt when their naming scheme changes.
+Staging and recovery names use bounded sibling components, so accepted bundle
+keys through 255 bytes retain the same install, update, and recovery lifecycle.
 
 ## Symlink strategy
 

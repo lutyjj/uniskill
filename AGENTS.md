@@ -40,13 +40,13 @@ Modules own narrow jobs:
 | `harnesses.rs` | Registry loading and configurable skill/MCP destinations |
 | `fetch_plan.rs` | Deduplicated, bounded remote downloads and progress |
 | `mcp/` | Server rendering, native documents, ownership, transactional writes |
-| `persistence.rs` | Atomic, durable file replacement shared by ownership stores |
+| `persistence.rs` | Bounded regular-file reads and atomic, durable replacement |
 | `hook.rs` | Installing the `post-checkout` git hook and global dispatcher |
 | `linker.rs` | Harness symlink creation and status classification |
 | `skill.rs` | Shared skill-directory predicate |
 | `state.rs` | Manifest load/save and managed-link ownership checks |
 | `sync.rs` | Sync orchestration and structured reports |
-| `worktree.rs` | Git worktree topology and harness-path retargeting |
+| `worktree.rs` | Git worktree topology, retargeting, and physical destination scope |
 
 Do not move filesystem mutation, output formatting, and config parsing into the
 same function. If a change crosses those boundaries, add a small API between

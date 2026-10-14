@@ -142,7 +142,11 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
     let inputs = worktree_inputs(explicit_config, &ctx)?;
     // Keep the worktree's manifest in the worktree itself: scoped so a main sync
     // never prunes these links, and self-cleaning when the worktree is removed.
-    let state_dir = ctx.worktree_root.join(".uniskill-cache");
+    let state_path = ctx.destination(&ctx.worktree_root.join(".uniskill-cache/state.toml"))?;
+    let state_dir = state_path
+        .parent()
+        .expect("state file has parent")
+        .to_path_buf();
 
     let mcp_report = if options.check {
         mcp::check(
@@ -209,7 +213,7 @@ fn worktree_inputs(
     if let Some(path) = explicit_config {
         let config = config::parse_config(path)?;
         return Ok(WorktreeInputs {
-            registry: merge_registry(&config)?,
+            registry: harnesses::registry(&config)?,
             mcp: config.mcp,
             bundles: config.bundles,
             cache_dir: shared_cache_dir(),
@@ -220,7 +224,7 @@ fn worktree_inputs(
     if project_config.exists() {
         let config = config::parse_config(&project_config)?;
         return Ok(WorktreeInputs {
-            registry: merge_registry(&config)?,
+            registry: harnesses::registry(&config)?,
             mcp: config.mcp,
             bundles: config.bundles,
             cache_dir: ctx.main_root.join(".uniskill-cache"),
@@ -232,7 +236,7 @@ fn worktree_inputs(
         .unwrap_or_else(|| PathBuf::from("./config.toml"));
     let config = config::parse_config(&default_path)?;
     Ok(WorktreeInputs {
-        registry: merge_registry(&config)?,
+        registry: harnesses::registry(&config)?,
         mcp: config.mcp,
         bundles: config.bundles,
         cache_dir: shared_cache_dir(),
@@ -249,35 +253,11 @@ fn shared_cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./.uniskill-cache"))
 }
 
-/// Merge user-defined global harnesses over the built-in defaults.
-fn merge_registry(config: &config::Config) -> Result<HashMap<String, harnesses::HarnessDef>> {
-    let mut registry = harnesses::default_harnesses()?;
-    for (name, harness) in &config.harnesses {
-        let target = registry
-            .entry(name.clone())
-            .or_insert_with(|| harnesses::HarnessDef {
-                label: name.clone(),
-                pattern: None,
-                mcp: None,
-            });
-        if let Some(label) = &harness.label {
-            target.label = label.clone();
-        }
-        if let Some(pattern) = &harness.pattern {
-            target.pattern = Some(pattern.clone());
-        }
-        if let Some(mcp) = &harness.mcp {
-            target.mcp = Some(mcp.clone());
-        }
-    }
-    Ok(registry)
-}
-
 /// Sync from an explicit global config path.
 fn sync_from_path(config_path: PathBuf, options: SyncOptions) -> Result<()> {
     let config = config::parse_config(&config_path)?;
 
-    let registry = merge_registry(&config)?;
+    let registry = harnesses::registry(&config)?;
     let cache_dir = shared_cache_dir();
 
     run_sync(&config, &registry, &cache_dir, options)
@@ -289,7 +269,7 @@ fn sync_project(
     config_dir: PathBuf,
     options: SyncOptions,
 ) -> Result<()> {
-    let registry = merge_registry(project_config)?;
+    let registry = harnesses::registry(project_config)?;
 
     // Use project-local cache directory for assembled bundles.
     let cache_dir = config_dir.join(".uniskill-cache");

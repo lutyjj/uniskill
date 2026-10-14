@@ -18,6 +18,16 @@ pub struct WorktreeContext {
 }
 
 impl WorktreeContext {
+    /// Check the physical destination after resolving parent aliases.
+    pub fn destination(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        let destination = crate::config::destination_path(path)?;
+        let root = self.worktree_root.canonicalize()?;
+        if !destination.starts_with(&root) || destination == root {
+            anyhow::bail!("worktree destination lies outside its checkout");
+        }
+        Ok(destination)
+    }
+
     /// Detect the worktree topology for `dir`.
     ///
     /// Returns `None` when `dir` is not inside a git worktree, or when it is the

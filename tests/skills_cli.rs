@@ -98,6 +98,510 @@ source = "source"
 "#;
 
 #[test]
+fn legacy_destination_aliases_upgrade_without_pruning_the_live_link() {
+    let f = Fixture::new();
+    f.skill("source", "fixture");
+    fs::create_dir(f.path("target")).unwrap();
+    std::os::unix::fs::symlink(f.path("target"), f.path("alias")).unwrap();
+    let config = f.write(
+        "config.toml",
+        LOCAL.to_owned() + "\n[harnesses.alias]\npattern='alias/{name}'\n",
+    );
+    success(f.run(&config, &[]));
+    let state = f.path("cache/uniskill/state.toml");
+    let mut value: toml::Value = toml::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    let mut alias = value["links"][0].clone();
+    alias["path"] = toml::Value::String(f.path("alias/demo").to_string_lossy().into_owned());
+    alias["harness"] = toml::Value::String("alias".into());
+    value["links"].as_array_mut().unwrap().push(alias);
+    fs::write(&state, toml::to_string(&value).unwrap()).unwrap();
+    let before = snapshot(&f.path("target/demo"));
+    success(f.run(&config, &[]));
+    assert_eq!(snapshot(&f.path("target/demo")), before);
+    let upgraded = snapshot(&state);
+    success(f.run(&config, &[]));
+    assert_eq!(snapshot(&f.path("target/demo")), before);
+    assert_eq!(snapshot(&state), upgraded);
+}
+
+#[test]
+fn failed_bundles_reserve_installed_destinations_until_they_are_removed() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    f.skill("other", "two");
+    let one = LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false");
+    let config = f.write("config.toml", &one);
+    success(f.run(&config, &[]));
+    let before = snapshot(&f.path("target/demo"));
+    fs::remove_dir_all(f.path("source")).unwrap();
+    let two = "[bundles.two]\nharnesses=['fixture']\n[bundles.two.skills.demo]\nsource='other'\n";
+    f.write("config.toml", format!("{one}\n{two}"));
+    for _ in 0..2 {
+        assert!(!f.run(&config, &[]).status.success());
+        assert_eq!(snapshot(&f.path("target/demo")), before);
+        assert_eq!(
+            fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+            "one"
+        );
+        assert!(!f.path("cache/uniskill/bundles/two").exists());
+    }
+    f.write(
+        "config.toml",
+        format!("[harnesses.fixture]\npattern='target/{{name}}'\n{two}"),
+    );
+    success(f.run(&config, &[]));
+    assert_eq!(
+        fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+        "two"
+    );
+}
+
+#[test]
+fn legacy_alias_claims_cannot_prune_a_failed_owners_physical_link() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    fs::create_dir(f.path("target")).unwrap();
+    std::os::unix::fs::symlink(f.path("target"), f.path("alias")).unwrap();
+    let config = f.write("config.toml", LOCAL);
+    success(f.run(&config, &[]));
+    let state = f.path("cache/uniskill/state.toml");
+    let mut value: toml::Value = toml::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    let mut old = value["links"][0].clone();
+    old["path"] = toml::Value::String(f.path("alias/demo").to_string_lossy().into_owned());
+    old["bundle"] = toml::Value::String("retired".into());
+    value["links"].as_array_mut().unwrap().push(old);
+    fs::write(&state, toml::to_string(&value).unwrap()).unwrap();
+    f.write(
+        "config.toml",
+        LOCAL.replace("harnesses = [\"fixture\"]", "harnesses=['missing']"),
+    );
+    let before = snapshot(&f.path("target/demo"));
+    for _ in 0..2 {
+        assert!(!f.run(&config, &[]).status.success());
+        assert_eq!(snapshot(&f.path("target/demo")), before);
+        assert_eq!(
+            fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+            "one"
+        );
+        let value: toml::Value = toml::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+        assert_eq!(value["links"].as_array().unwrap().len(), 1);
+        assert_eq!(value["links"][0]["bundle"].as_str(), Some("one"));
+    }
+}
+
+#[test]
+fn overlapping_skill_roots_fail_before_source_or_ownership_changes() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    f.skill("other", "two");
+    let config = f.write("config.toml", LOCAL.to_owned() + "\n[harnesses.nested]\npattern='target/demo/{name}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n");
+    for _ in 0..2 {
+        assert!(!f.run(&config, &[]).status.success());
+        assert!(!f.path("target/demo").exists());
+        assert!(!f.path("source/extra").exists());
+        assert!(!f.path("cache/uniskill/bundles/one").exists());
+        assert!(!f.path("cache/uniskill/state.toml").exists());
+    }
+}
+
+#[test]
+fn failed_ownership_reservations_propagate_across_bundle_handoffs() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    f.skill("other", "two");
+    f.skill("third", "three");
+    let initial = format!("{LOCAL}\n[harnesses.second]\npattern='second/{{name}}'\n[bundles.two]\nharnesses=['second']\n[bundles.two.skills.demo]\nsource='other'\n");
+    let config = f.write("config.toml", &initial);
+    success(f.run(&config, &[]));
+    let paths = ["target/demo", "second/demo", "cache/uniskill/state.toml"];
+    let before = paths.map(|path| {
+        (
+            snapshot(&f.path(path)),
+            fs::read_link(f.path(path)).ok(),
+            fs::read(f.path(path)).ok(),
+        )
+    });
+    f.write("config.toml", initial.replace("harnesses = [\"fixture\"]", "harnesses = ['missing']").replace("harnesses=['second']", "harnesses=['fixture']") + "\n[bundles.three]\nharnesses=['second']\n[bundles.three.skills.demo]\nsource='third'\n");
+    for _ in 0..2 {
+        assert!(!f.run(&config, &[]).status.success());
+        assert_eq!(
+            paths.map(|path| (
+                snapshot(&f.path(path)),
+                fs::read_link(f.path(path)).ok(),
+                fs::read(f.path(path)).ok()
+            )),
+            before
+        );
+        assert_eq!(
+            fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(f.path("second/demo/SKILL.md")).unwrap(),
+            "two"
+        );
+        assert!(!f.path("cache/uniskill/bundles/three").exists());
+    }
+}
+
+#[test]
+fn retained_skill_roots_reject_nested_destinations_without_editing_sources() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    f.skill("other", "two");
+    let config = f.write("config.toml", LOCAL);
+    success(f.run(&config, &[]));
+    let before = (
+        snapshot(&f.path("target/demo")),
+        fs::read(f.path("cache/uniskill/state.toml")).unwrap(),
+    );
+    f.write("config.toml", LOCAL.replace("harnesses = [\"fixture\"]", "harnesses = ['missing']") + "\n[harnesses.nested]\npattern='target/demo/{name}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n");
+    for _ in 0..2 {
+        assert!(!f.run(&config, &[]).status.success());
+        assert_eq!(
+            (
+                snapshot(&f.path("target/demo")),
+                fs::read(f.path("cache/uniskill/state.toml")).unwrap()
+            ),
+            before
+        );
+        assert!(!f.path("source/extra").exists());
+        assert!(!f.path("cache/uniskill/bundles/two").exists());
+    }
+}
+
+#[test]
+fn a_bundle_cannot_move_its_destination_below_its_existing_skill_root() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    let config = f.write("config.toml", LOCAL);
+    success(f.run(&config, &[]));
+    let before = (
+        snapshot(&f.path("target/demo")),
+        fs::read(f.path("cache/uniskill/state.toml")).unwrap(),
+    );
+    f.write(
+        "config.toml",
+        LOCAL.replace("target/{name}", "target/demo/{name}"),
+    );
+    assert!(!f.run(&config, &[]).status.success());
+    assert_eq!(
+        (
+            snapshot(&f.path("target/demo")),
+            fs::read(f.path("cache/uniskill/state.toml")).unwrap()
+        ),
+        before
+    );
+    assert!(!f.path("source/demo").exists());
+}
+
+#[test]
+fn destination_handoffs_wait_for_the_configured_owner_to_retire_its_link() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    f.skill("other", "two");
+    let config = f.write("config.toml", LOCAL);
+    success(f.run(&config, &[]));
+    f.write(
+        "config.toml",
+        LOCAL.replace("skills.demo", "skills.moved")
+            + "\n[bundles.two]\nharnesses=['fixture']\n[bundles.two.skills.demo]\nsource='other'\n",
+    );
+    assert!(!f.run(&config, &[]).status.success());
+    assert!(!f.path("target/demo").is_symlink());
+    assert_eq!(
+        fs::read_to_string(f.path("target/moved/SKILL.md")).unwrap(),
+        "one"
+    );
+    assert!(!f.path("cache/uniskill/bundles/two").exists());
+    success(f.run(&config, &[]));
+    assert_eq!(
+        fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+        "two"
+    );
+    let before = (
+        snapshot(&f.path("target/demo")),
+        snapshot(&f.path("target/moved")),
+        snapshot(&f.path("cache/uniskill/state.toml")),
+    );
+    success(f.run(&config, &[]));
+    assert_eq!(
+        (
+            snapshot(&f.path("target/demo")),
+            snapshot(&f.path("target/moved")),
+            snapshot(&f.path("cache/uniskill/state.toml"))
+        ),
+        before
+    );
+}
+
+#[test]
+fn custom_destinations_do_not_require_unused_builtin_environment_variables() {
+    let f = Fixture::new();
+    f.skill("source", "fixture");
+    let config = f.write("config.toml", LOCAL);
+    success(
+        f.command(env!("CARGO_BIN_EXE_uniskill"))
+            .arg("--config")
+            .arg(config)
+            .arg("sync")
+            .env_remove("HOME")
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn oversized_bundle_names_fail_before_cache_publication() {
+    let f = Fixture::new();
+    f.skill("source", "fixture");
+    let config = f.write(
+        "config.toml",
+        LOCAL.replace("bundles.one", &format!("bundles.{}", "a".repeat(256))),
+    );
+    assert!(!f.run(&config, &[]).status.success());
+    assert!(!f.path("target/demo").exists());
+    assert!(!f.path("cache/uniskill/bundles").exists());
+}
+
+#[test]
+fn symlinked_and_oversized_skill_ownership_fail_before_application() {
+    for kind in ["symlink", "oversized"] {
+        let f = Fixture::new();
+        f.skill("source", "fixture");
+        let config = f.write("config.toml", LOCAL);
+        let state = f.path("cache/uniskill/state.toml");
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        if kind == "symlink" {
+            let outside = f.write("outside.toml", "links=[]\n");
+            std::os::unix::fs::symlink(outside, &state).unwrap();
+        } else {
+            fs::File::create(&state)
+                .unwrap()
+                .set_len(64 * 1024 * 1024 + 1)
+                .unwrap();
+        }
+        let before = snapshot(&state);
+        assert!(!f.run(&config, &[]).status.success(), "{kind}");
+        assert_eq!(snapshot(&state), before, "{kind}");
+        assert!(!f.path("target/demo").exists());
+        assert!(!f.path("cache/uniskill/bundles").exists());
+        if kind == "symlink" {
+            assert_eq!(
+                fs::read_to_string(f.path("outside.toml")).unwrap(),
+                "links=[]\n"
+            );
+            assert!(state.is_symlink());
+        }
+    }
+}
+
+fn linked_project(f: &Fixture, text: &str) -> PathBuf {
+    let main = f.repo("main");
+    f.write("main/tracked", "fixture");
+    success(f.git(&main, &["add", "."]));
+    success(f.git(&main, &["commit", "-qm", "fixture"]));
+    f.skill("main/source", "one");
+    f.write("main/uniskill.toml", text);
+    success(
+        f.command(env!("CARGO_BIN_EXE_uniskill"))
+            .arg("sync")
+            .current_dir(&main)
+            .output()
+            .unwrap(),
+    );
+    let linked = f.path("linked");
+    success(f.git(&main, &["worktree", "add", "-q", linked.to_str().unwrap()]));
+    linked
+}
+
+#[test]
+fn worktree_failed_bundles_keep_their_destinations_reserved() {
+    let f = Fixture::new();
+    f.skill("main/other", "two");
+    let initial = format!("{LOCAL}\n[harnesses.second]\npattern='second/{{name}}'\n[bundles.two]\nharnesses=['second']\n[bundles.two.skills.demo]\nsource='other'\n");
+    let linked = linked_project(&f, &initial);
+    let run = || {
+        f.command(env!("CARGO_BIN_EXE_uniskill"))
+            .args(["sync", "--worktree"])
+            .current_dir(&linked)
+            .output()
+            .unwrap()
+    };
+    success(run());
+    let link = linked.join("target/demo");
+    let state = linked.join(".uniskill-cache/state.toml");
+    let before = (
+        snapshot(&link),
+        fs::read_link(&link).unwrap(),
+        fs::read(&state).unwrap(),
+    );
+    fs::rename(
+        f.path("main/.uniskill-cache/bundles/one"),
+        f.path("displaced"),
+    )
+    .unwrap();
+    f.write(
+        "main/uniskill.toml",
+        initial.replace("harnesses=['second']", "harnesses=['fixture']"),
+    );
+    for _ in 0..2 {
+        assert!(!run().status.success());
+        assert_eq!(
+            (
+                snapshot(&link),
+                fs::read_link(&link).unwrap(),
+                fs::read(&state).unwrap()
+            ),
+            before
+        );
+        assert_eq!(
+            fs::read_to_string(linked.join("second/demo/SKILL.md")).unwrap(),
+            "two"
+        );
+    }
+    fs::rename(
+        f.path("displaced"),
+        f.path("main/.uniskill-cache/bundles/one"),
+    )
+    .unwrap();
+    f.write("main/uniskill.toml", initial);
+    success(run());
+    assert_eq!(
+        (
+            snapshot(&link),
+            fs::read_link(&link).unwrap(),
+            fs::read(&state).unwrap()
+        ),
+        before
+    );
+}
+
+#[test]
+fn worktree_destinations_and_state_stay_inside_the_checkout_after_alias_resolution() {
+    for kind in [
+        "skill",
+        "mcp",
+        "state",
+        "mcp-state",
+        "old-ownership",
+        "mcp-old-ownership",
+        "mcp-journal",
+        "mcp-restored-ownership",
+    ] {
+        let f = Fixture::new();
+        let text = if kind == "mcp" {
+            "[harnesses.fixture.mcp]\npath='target/native.json'\nformat='json'\ntable=['servers']\n[mcp.docs]\nharnesses=['fixture']\nurl='https://example.invalid/mcp'\n"
+        } else {
+            LOCAL
+        };
+        let linked = linked_project(&f, text);
+        let outside = f.path("outside");
+        fs::create_dir(&outside).unwrap();
+        let foreign = outside.join("demo");
+        std::os::unix::fs::symlink(f.path("manual"), &foreign).unwrap();
+        f.write("outside/native.json", "{}");
+        let before = snapshot(&foreign);
+        match kind {
+            "skill" | "mcp" => std::os::unix::fs::symlink(&outside, linked.join("target")).unwrap(),
+            "state" => {
+                std::os::unix::fs::symlink(&outside, linked.join(".uniskill-cache")).unwrap()
+            }
+            "mcp-state" => {
+                fs::create_dir(linked.join(".uniskill-cache")).unwrap();
+                std::os::unix::fs::symlink(&outside, linked.join(".uniskill-cache/mcp")).unwrap();
+            }
+            "mcp-old-ownership" | "mcp-journal" | "mcp-restored-ownership" => {
+                std::os::unix::fs::symlink(&outside, linked.join("target")).unwrap();
+                f.write("main/uniskill.toml", "");
+                let native = linked.join("target/native.json");
+                let owned = serde_json::json!({"version":1,"entries":[{
+                    "identity":{"path":native,"table":["servers"],"name":"docs"},
+                    "format":"json","digest":"0".repeat(64)
+                }]})
+                .to_string();
+                let empty = serde_json::json!({"version":1,"entries":[]}).to_string();
+                let state = f.write(
+                    "linked/.uniskill-cache/mcp/state.json",
+                    if kind == "mcp-old-ownership" {
+                        &owned
+                    } else {
+                        &empty
+                    },
+                );
+                if kind != "mcp-old-ownership" {
+                    let update = if kind == "mcp-journal" {
+                        serde_json::json!({"path":native,"before":null,"after":"{}","mode":384})
+                    } else {
+                        serde_json::json!({"path":state,"before":owned,"after":empty,"mode":384})
+                    };
+                    f.write(
+                        "linked/.uniskill-cache/mcp/journal.json",
+                        serde_json::json!({"version":1,"updates":[update]}).to_string(),
+                    );
+                }
+            }
+            _ => {
+                fs::remove_file(&foreign).unwrap();
+                std::os::unix::fs::symlink(
+                    f.path("main/.uniskill-cache/bundles/one/skills/demo"),
+                    &foreign,
+                )
+                .unwrap();
+                f.write(
+                    "linked/.uniskill-cache/state.toml",
+                    format!(
+                        "[[links]]\npath={:?}\nskill='demo'\nharness='fixture'\nbundle='one'\n",
+                        foreign.to_string_lossy()
+                    ),
+                );
+                f.write("main/uniskill.toml", "");
+            }
+        }
+        let original = fs::read(linked.join(".uniskill-cache/state.toml")).ok();
+        let mcp_state = || {
+            ["state.json", "journal.json"]
+                .map(|name| fs::read(linked.join(".uniskill-cache/mcp").join(name)).ok())
+        };
+        let original_mcp = mcp_state();
+        let outside_entries = || {
+            let mut entries: Vec<_> = fs::read_dir(&outside)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            entries.sort();
+            entries
+        };
+        let original_entries = outside_entries();
+        let foreign_target = fs::read_link(&foreign).unwrap();
+        let output = f
+            .command(env!("CARGO_BIN_EXE_uniskill"))
+            .args(["sync", "--worktree"])
+            .current_dir(&linked)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{kind}");
+        assert_eq!(fs::read_link(&foreign).unwrap(), foreign_target, "{kind}");
+        if kind != "old-ownership" {
+            assert_eq!(snapshot(&foreign), before, "{kind}");
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("native.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            fs::read(linked.join(".uniskill-cache/state.toml")).ok(),
+            original,
+            "{kind}"
+        );
+        assert!(!outside.join("state.toml").exists());
+        assert!(!outside.join("mcp").exists());
+        assert_eq!(outside_entries(), original_entries, "{kind}");
+        assert_eq!(mcp_state(), original_mcp, "{kind}");
+    }
+}
+
+#[test]
 fn default_git_ref_and_branch_named_head_install_distinct_contents() {
     for jobs in ["1", "4"] {
         let f = Fixture::new();

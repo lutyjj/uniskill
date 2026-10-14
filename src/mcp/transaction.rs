@@ -1,5 +1,4 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -27,31 +26,7 @@ struct Journal {
 }
 
 pub fn read(path: &Path) -> Result<Option<Vec<u8>>> {
-    read_limited(path, MAX_BYTES)
-}
-
-fn read_limited(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                bail!(
-                    "configuration path is not a regular file: {}",
-                    path.display()
-                );
-            }
-            if metadata.len() > limit {
-                bail!("configuration exceeds its size limit: {}", path.display());
-            }
-            let mut bytes = Vec::new();
-            File::open(path)?.take(limit + 1).read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > limit {
-                bail!("configuration exceeds its size limit: {}", path.display());
-            }
-            Ok(Some(bytes))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    crate::persistence::read(path, MAX_BYTES)
 }
 
 pub fn mode(path: &Path) -> Result<u32> {
@@ -114,7 +89,8 @@ pub fn pending(state_dir: &Path) -> bool {
 }
 
 fn read_journal(state_dir: &Path) -> Result<Option<Journal>> {
-    let Some(bytes) = read_limited(&state_dir.join("journal.json"), MAX_JOURNAL_BYTES)? else {
+    let Some(bytes) = crate::persistence::read(&state_dir.join("journal.json"), MAX_JOURNAL_BYTES)?
+    else {
         return Ok(None);
     };
     let journal: Journal = serde_json::from_slice(&bytes)

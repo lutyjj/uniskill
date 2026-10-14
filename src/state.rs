@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+
 pub fn lock(cache_dir: &Path) -> Result<File> {
     fs::create_dir_all(cache_dir)?;
     let file = OpenOptions::new()
@@ -43,22 +45,26 @@ impl Manifest {
     /// Only an absent manifest means no ownership. Unreadable state fails closed.
     pub fn load(cache_dir: &Path) -> Result<Self> {
         let path = Self::path(cache_dir);
-        match fs::read_to_string(&path) {
-            Ok(body) => toml::from_str(&body).context("invalid skill ownership manifest"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+        match crate::persistence::read(&path, MAX_MANIFEST_BYTES)? {
+            Some(bytes) => {
+                toml::from_str(std::str::from_utf8(&bytes).context("skill ownership is not UTF-8")?)
+                    .context("invalid skill ownership manifest")
+            }
+            None => Ok(Self::default()),
         }
     }
 
     /// Persist the manifest next to the assembled bundles.
     pub fn save(&self, cache_dir: &Path) -> Result<()> {
         let path = Self::path(cache_dir);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
         let body = toml::to_string(self).context("failed to serialize uniskill state")?;
-        if fs::read(&path).ok().as_deref() == Some(body.as_bytes()) {
+        if body.len() as u64 > MAX_MANIFEST_BYTES {
+            anyhow::bail!("skill ownership manifest exceeds its size limit");
+        }
+        let previous = crate::persistence::read(&path, MAX_MANIFEST_BYTES)?;
+        if (self.links.is_empty() && previous.is_none())
+            || previous.as_deref() == Some(body.as_bytes())
+        {
             return Ok(());
         }
         crate::persistence::atomic_write(&path, body.as_bytes(), 0o600)
