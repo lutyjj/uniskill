@@ -1808,6 +1808,58 @@ fn full_commit_ids_keep_precedence_over_hash_named_refs() {
 }
 
 #[test]
+fn sha256_commit_prefixes_match_on_initial_fetch_and_cache_reuse() {
+    let f = Fixture::new();
+    let origin = f.path("origin");
+    fs::create_dir_all(&origin).unwrap();
+    success(f.git(
+        &origin,
+        &["init", "-q", "-b", "main", "--object-format=sha256"],
+    ));
+    success(f.git(&origin, &["config", "user.name", "Fixture"]));
+    success(f.git(
+        &origin,
+        &["config", "user.email", "fixture@example.invalid"],
+    ));
+    f.skill("origin", "selected commit");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "selected"]));
+    let commit = String::from_utf8(f.git(&origin, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(commit.len(), 64);
+    f.skill("origin", "default branch");
+    success(f.git(&origin, &["commit", "-qam", "default"]));
+    let mut text =
+        "[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\n"
+            .to_string();
+    for (name, reference) in [
+        ("short", &commit[..12]),
+        ("prefix", &commit[..40]),
+        ("full", &commit),
+    ] {
+        text.push_str(&format!(
+            "[bundles.one.skills.{name}]\nrepo='./origin'\nref={reference:?}\n"
+        ));
+    }
+    let config = f.write("config.toml", text);
+    success(f.run(&config, &[]));
+    let paths = [
+        f.path("target/short/SKILL.md"),
+        f.path("target/prefix/SKILL.md"),
+        f.path("target/full/SKILL.md"),
+        f.path("cache/uniskill/state.toml"),
+    ];
+    for path in &paths[..3] {
+        assert_eq!(fs::read_to_string(path).unwrap(), "selected commit");
+    }
+    let before = paths.each_ref().map(|path| snapshot(path));
+    success(f.run(&config, &[]));
+    assert_eq!(paths.each_ref().map(|path| snapshot(path)), before);
+}
+
+#[test]
 fn default_git_sources_update_without_cached_upstream_metadata() {
     let f = Fixture::new();
     let origin = f.repo("origin");

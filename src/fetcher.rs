@@ -346,12 +346,42 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
     use sha2::{Digest, Sha256};
     let repo_url = &source.repo;
     let git_ref = source.git_ref.as_deref();
-    let immutable_commit =
-        git_ref.filter(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()));
     let key = format!("{:x}", Sha256::digest(serde_json::to_vec(source)?));
     let repo_dir = base_dir.join("repos").join(key);
 
     let cached = repo_dir.exists();
+    if !cached {
+        if let Some(parent) = repo_dir.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create git cache directory at {}",
+                    parent.display()
+                )
+            })?;
+        }
+        run_command(
+            Command::new("git")
+                .arg("clone")
+                .arg("--quiet")
+                .arg("--")
+                .arg(repo_url)
+                .arg(&repo_dir),
+        )
+        .with_context(|| format!("failed to clone git skill repository {repo_url}"))?;
+    }
+
+    // Git's storage format determines the full object ID width.
+    let object_id = run_command(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_dir)
+            .args(["hash-object", "--stdin"])
+            .stdin(std::process::Stdio::null()),
+    )?;
+    let immutable_commit = git_ref.filter(|reference| {
+        reference.len() == object_id.stdout.trim_ascii().len()
+            && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
     if cached {
         if let Some(commit) = immutable_commit {
             let object = Command::new("git")
@@ -382,24 +412,6 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
                 return Ok(repo_dir);
             }
         }
-    } else {
-        if let Some(parent) = repo_dir.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create git cache directory at {}",
-                    parent.display()
-                )
-            })?;
-        }
-        run_command(
-            Command::new("git")
-                .arg("clone")
-                .arg("--quiet")
-                .arg("--")
-                .arg(repo_url)
-                .arg(&repo_dir),
-        )
-        .with_context(|| format!("failed to clone git skill repository {repo_url}"))?;
     }
 
     let commit = match immutable_commit {

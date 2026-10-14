@@ -118,7 +118,8 @@ remote's advertised names. uniskill fetches the selected object and checks out
 its commit directly; cached tracking refs and branch ancestry never choose
 content. An omitted `ref` selects the remote's `HEAD`.
 
-Full commit IDs take precedence over names on initial fetch and cache reuse.
+Full commit IDs use the repository's object format and take precedence over
+names on initial fetch and cache reuse.
 Use `refs/heads/...` or `refs/tags/...` for a branch or tag whose name looks like
 a full commit ID.
 Abbreviated commit IDs must identify one fetched object.
