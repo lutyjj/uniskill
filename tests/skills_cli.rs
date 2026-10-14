@@ -98,6 +98,156 @@ source = "source"
 "#;
 
 #[test]
+fn aliases_into_installed_skills_cannot_write_below_their_exposed_roots() {
+    for kind in ["live", "copied", "failed-owner"] {
+        let f = Fixture::new();
+        f.skill("source", "one");
+        f.skill("other", "two");
+        let initial = if kind == "copied" {
+            LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false")
+        } else {
+            LOCAL.to_owned()
+        };
+        let config = f.write("config.toml", &initial);
+        success(f.run(&config, &[]));
+        std::os::unix::fs::symlink(f.path("target/demo"), f.path("alias")).unwrap();
+        let state = f.path("cache/uniskill/state.toml");
+        let cache = f.path("cache/uniskill/bundles/one/skills/demo");
+        let before = (
+            snapshot(&f.path("target/demo")),
+            snapshot(&cache),
+            fs::read(&state).unwrap(),
+        );
+        let changed = if kind == "failed-owner" {
+            initial.replace("harnesses = [\"fixture\"]", "harnesses=['missing']")
+        } else {
+            initial
+        };
+        f.write("config.toml", changed + "\n[harnesses.nested]\npattern='alias/{name}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n");
+        for _ in 0..2 {
+            let output = f.run(&config, &[]);
+            assert!(!output.status.success(), "{kind}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("overlap"),
+                "{kind}"
+            );
+            assert_eq!(
+                (
+                    snapshot(&f.path("target/demo")),
+                    snapshot(&cache),
+                    fs::read(&state).unwrap()
+                ),
+                before,
+                "{kind}"
+            );
+            assert_eq!(fs::read_to_string(cache.join("SKILL.md")).unwrap(), "one");
+            assert!(!cache.join("extra").exists());
+            assert!(!f.path("source/extra").exists());
+            assert!(!f.path("cache/uniskill/bundles/two").exists());
+        }
+    }
+}
+
+#[test]
+fn planned_skill_footprints_protect_live_sources_and_future_copied_caches() {
+    for copied in [false, true] {
+        let f = Fixture::new();
+        f.skill("source", "one");
+        f.skill("other", "two");
+        std::os::unix::fs::symlink(f.path("source"), f.path("alias")).unwrap();
+        let (initial, pattern) = if copied {
+            (
+                LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false"),
+                "cache/uniskill/bundles/one/skills/demo/{name}",
+            )
+        } else {
+            (LOCAL.to_owned(), "alias/{name}")
+        };
+        let config = f.write("config.toml", format!("{initial}\n[harnesses.nested]\npattern='{pattern}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n"));
+        for _ in 0..2 {
+            let output = f.run(&config, &[]);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("overlap"));
+            assert!(!f.path("source/extra").exists());
+            assert!(!f.path("target/demo").exists());
+            assert!(!f.path("cache/uniskill/bundles/one").exists());
+            assert!(!f.path("cache/uniskill/bundles/two").exists());
+            assert!(!f.path("cache/uniskill/state.toml").exists());
+        }
+    }
+}
+
+#[test]
+fn missing_skill_roots_keep_their_recorded_target_directories_reserved() {
+    for kind in ["copied-cache", "live-source"] {
+        let f = Fixture::new();
+        f.skill("source", "one");
+        f.skill("other", "two");
+        let initial = if kind == "copied-cache" {
+            LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false")
+        } else {
+            LOCAL.to_owned()
+        };
+        let config = f.write("config.toml", &initial);
+        success(f.run(&config, &[]));
+        let (owner, pattern, missing) = if kind == "copied-cache" {
+            fs::rename(f.path("cache/uniskill/bundles/one"), f.path("displaced")).unwrap();
+            (
+                initial.replace("harnesses = [\"fixture\"]", "harnesses=['missing']"),
+                "cache/uniskill/bundles/one/skills/demo/{name}",
+                f.path("cache/uniskill/bundles/one"),
+            )
+        } else {
+            fs::remove_dir_all(f.path("source")).unwrap();
+            (initial, "source/{name}", f.path("source"))
+        };
+        let before = (
+            snapshot(&f.path("target/demo")),
+            fs::read(f.path("cache/uniskill/state.toml")).unwrap(),
+        );
+        f.write("config.toml", format!("{owner}\n[harnesses.nested]\npattern='{pattern}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n"));
+        for _ in 0..2 {
+            let output = f.run(&config, &[]);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("overlap"));
+            assert_eq!(
+                (
+                    snapshot(&f.path("target/demo")),
+                    fs::read(f.path("cache/uniskill/state.toml")).unwrap()
+                ),
+                before
+            );
+            assert!(!missing.exists());
+            assert!(!f.path("cache/uniskill/bundles/two").exists());
+        }
+    }
+}
+
+#[test]
+fn multiple_entries_can_expose_one_live_directory_without_false_overlaps() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    let config = f.write(
+        "config.toml",
+        LOCAL
+            .replace(
+                "harnesses = [\"fixture\"]",
+                "harnesses=['fixture','mirror']",
+            )
+            .replace("target/{name}", "source/../target/{name}")
+            + "\n[harnesses.mirror]\npattern='mirror/{name}'\n",
+    );
+    success(f.run(&config, &[]));
+    let paths = ["target/demo", "mirror/demo", "cache/uniskill/state.toml"];
+    let before = paths.map(|p| snapshot(&f.path(p)));
+    success(f.run(&config, &[]));
+    assert_eq!(paths.map(|p| snapshot(&f.path(p))), before);
+    for path in ["target/demo", "mirror/demo"] {
+        assert_eq!(fs::canonicalize(f.path(path)).unwrap(), f.path("source"));
+    }
+}
+
+#[test]
 fn legacy_destination_aliases_upgrade_without_pruning_the_live_link() {
     let f = Fixture::new();
     f.skill("source", "fixture");
@@ -475,6 +625,56 @@ fn worktree_failed_bundles_keep_their_destinations_reserved() {
         ),
         before
     );
+}
+
+#[test]
+fn worktree_aliases_cannot_enter_an_installed_skill_inside_the_checkout() {
+    let f = Fixture::new();
+    f.skill("main/other", "two");
+    let initial = format!("{LOCAL}\n[harnesses.second]\npattern='second/{{name}}'\n[bundles.two]\nharnesses=['second']\n[bundles.two.skills.extra]\nsource='other'\n");
+    let linked = linked_project(&f, &initial);
+    f.skill("linked/source", "one");
+    let inside = initial.replace(
+        "source = \"source\"",
+        &format!("source = {:?}", linked.join("source").to_string_lossy()),
+    );
+    f.write("main/uniskill.toml", &inside);
+    success(
+        f.command(env!("CARGO_BIN_EXE_uniskill"))
+            .arg("sync")
+            .current_dir(f.path("main"))
+            .output()
+            .unwrap(),
+    );
+    let run = || {
+        f.command(env!("CARGO_BIN_EXE_uniskill"))
+            .args(["sync", "--worktree"])
+            .current_dir(&linked)
+            .output()
+            .unwrap()
+    };
+    success(run());
+    std::os::unix::fs::symlink(linked.join("target/demo"), linked.join("alias")).unwrap();
+    let paths = ["target/demo", "second/extra", ".uniskill-cache/state.toml"];
+    let before = paths.map(|p| (snapshot(&linked.join(p)), fs::read(linked.join(p)).ok()));
+    f.write(
+        "main/uniskill.toml",
+        inside.replace("pattern='second/{name}'", "pattern='alias/{name}'"),
+    );
+    for _ in 0..2 {
+        let output = run();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("overlap"));
+        assert_eq!(
+            paths.map(|p| (snapshot(&linked.join(p)), fs::read(linked.join(p)).ok())),
+            before
+        );
+        assert!(!linked.join("source/extra").exists());
+        assert_eq!(
+            fs::read_to_string(linked.join("source/SKILL.md")).unwrap(),
+            "one"
+        );
+    }
 }
 
 #[test]

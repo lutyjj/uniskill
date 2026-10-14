@@ -71,45 +71,59 @@ fn state_failure(error: anyhow::Error) -> SyncReport {
     }
 }
 
-struct PriorLink {
-    owner: state::ManagedLink,
-    ancestors: BTreeSet<PathBuf>,
-}
-
-fn ancestor_destinations(path: &Path) -> Result<BTreeSet<PathBuf>> {
-    path.ancestors()
-        .skip(1)
-        .filter(|parent| parent.file_name().is_some())
-        .map(config::destination_path)
-        .collect()
+/// Preserve the mutable entry and the directory it exposes as separate roots.
+fn root_paths(entry: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut roots = BTreeSet::new();
+    let mut current = entry.to_path_buf();
+    loop {
+        if !roots.insert(current.clone()) {
+            bail!("cyclic skill root");
+        }
+        match current.canonicalize() {
+            Ok(directory) => {
+                roots.insert(directory);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let target = match std::fs::read_link(&current) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        };
+        let target = if target.is_absolute() {
+            target
+        } else {
+            current
+                .parent()
+                .context("skill root requires a parent")?
+                .join(target)
+        };
+        current = config::destination_path(&target)?;
+    }
+    Ok(roots)
 }
 
 fn begin(
     cache: &Path,
     state_dir: &Path,
     worktree: Option<&worktree::WorktreeContext>,
-) -> Result<(std::fs::File, PathBuf, Vec<PriorLink>)> {
+) -> Result<(std::fs::File, PathBuf, state::Manifest)> {
     let lock = state::lock(cache)?;
     let cache = cache.canonicalize()?;
     if let Some(ctx) = worktree {
         ctx.destination(&state_dir.join("state.toml"))?;
     }
-    let previous = state::Manifest::load(state_dir)?
-        .links
-        .into_iter()
-        .map(|mut owner| {
-            let declared = PathBuf::from(&owner.path);
-            let path = match worktree {
-                Some(ctx) => ctx.destination(&declared)?,
-                None => config::destination_path(&declared)?,
-            };
-            owner.path = path.to_string_lossy().into_owned();
-            Ok(PriorLink {
-                owner,
-                ancestors: ancestor_destinations(&declared)?,
-            })
-        })
-        .collect::<Result<_>>()?;
+    let mut previous = state::Manifest::load(state_dir)?;
+    for owner in &mut previous.links {
+        let declared = Path::new(&owner.path);
+        let path = match worktree {
+            Some(ctx) => ctx.destination(declared)?,
+            None => config::destination_path(declared)?,
+        };
+        owner.path = path.to_string_lossy().into_owned();
+    }
     Ok((lock, cache, previous))
 }
 
@@ -173,7 +187,7 @@ struct Route {
     source: PathBuf,
     owner: state::ManagedLink,
     label: String,
-    ancestors: BTreeSet<PathBuf>,
+    roots: BTreeSet<PathBuf>,
 }
 
 type Routes = BTreeMap<PathBuf, Vec<Route>>;
@@ -211,13 +225,19 @@ fn plan_bundle(
                 harness: destination.harness.clone(),
                 bundle: name.into(),
             };
+            let mut roots = root_paths(&path)?;
+            let directory = entry.path().canonicalize()?;
+            roots.insert(match directory.strip_prefix(skills) {
+                Ok(relative) => published.join("skills").join(relative),
+                Err(_) => directory,
+            });
             planned.push((
                 path,
                 Route {
                     source: published.join("skills").join(&skill),
                     owner,
                     label: destination.label.clone(),
-                    ancestors: ancestor_destinations(&declared)?,
+                    roots,
                 },
             ));
         }
@@ -230,64 +250,49 @@ fn plan_bundle(
 
 fn select_routes(
     routes: Routes,
-    previous: &[PriorLink],
+    previous: &state::Manifest,
     configured: &HashMap<String, config::Bundle>,
     failed: &mut BTreeSet<String>,
     report: &mut SyncReport,
-) -> BTreeMap<PathBuf, Route> {
+) -> Result<BTreeMap<PathBuf, Route>> {
     let mut descendants = BTreeMap::<PathBuf, BTreeSet<String>>::new();
-    for candidates in routes.values() {
+    let mut root_owners = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    for (path, candidates) in &routes {
         for route in candidates {
-            for parent in &route.ancestors {
+            for parent in path.ancestors().skip(1) {
                 descendants
-                    .entry(parent.clone())
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .insert(route.owner.bundle.clone());
+            }
+            for root in &route.roots {
+                root_owners
+                    .entry(root.clone())
                     .or_default()
                     .insert(route.owner.bundle.clone());
             }
         }
     }
     for (path, candidates) in &routes {
-        let different = candidates
+        let mut blocked = BTreeSet::new();
+        if candidates
             .iter()
-            .any(|route| route.source != candidates[0].source);
-        let nested = descendants.get(path);
-        if different || nested.is_some() {
-            let bundles: BTreeSet<_> = candidates
-                .iter()
-                .map(|r| r.owner.bundle.clone())
-                .chain(nested.into_iter().flatten().cloned())
-                .collect();
-            for bundle in bundles {
-                if !failed.contains(&bundle) {
-                    bundle_failure(
-                        report,
-                        failed,
-                        &bundle,
-                        anyhow::anyhow!(
-                            "overlapping or conflicting skill routes at {}",
-                            path.display()
-                        ),
-                    );
+            .any(|route| route.source != candidates[0].source)
+        {
+            blocked.extend(candidates.iter().map(|r| r.owner.bundle.clone()));
+        }
+        for route in candidates {
+            for root in &route.roots {
+                let mut overlaps = descendants.get(root).cloned().unwrap_or_default();
+                if root != path {
+                    if let Some(at_root) = routes.get(root) {
+                        overlaps.extend(at_root.iter().map(|r| r.owner.bundle.clone()));
+                    }
                 }
-            }
-        }
-    }
-    for old in previous {
-        let root = PathBuf::from(&old.owner.path);
-        let mut blocked = descendants.get(&root).cloned().unwrap_or_default();
-        for path in &old.ancestors {
-            if let Some(candidates) = routes.get(path) {
-                blocked.extend(candidates.iter().map(|r| r.owner.bundle.clone()));
-            }
-        }
-        if configured.contains_key(&old.owner.bundle) {
-            if let Some(candidates) = routes.get(&root) {
-                blocked.extend(
-                    candidates
-                        .iter()
-                        .filter(|r| r.owner.bundle != old.owner.bundle)
-                        .map(|r| r.owner.bundle.clone()),
-                );
+                if !overlaps.is_empty() {
+                    blocked.insert(route.owner.bundle.clone());
+                    blocked.extend(overlaps);
+                }
             }
         }
         for bundle in blocked {
@@ -297,14 +302,49 @@ fn select_routes(
                     failed,
                     &bundle,
                     anyhow::anyhow!(
-                        "skill destination overlaps existing ownership at {}",
-                        root.display()
+                        "overlapping or conflicting skill routes at {}",
+                        path.display()
                     ),
                 );
             }
         }
     }
-    routes
+    for old in &previous.links {
+        let entry = Path::new(&old.path);
+        let mut blocked = BTreeSet::new();
+        for root in root_paths(entry)? {
+            blocked.extend(descendants.get(&root).into_iter().flatten().cloned());
+            if let Some(at_root) = routes.get(&root) {
+                blocked.extend(
+                    at_root
+                        .iter()
+                        .filter(|r| {
+                            root != entry
+                                || (configured.contains_key(&old.bundle)
+                                    && r.owner.bundle != old.bundle)
+                        })
+                        .map(|r| r.owner.bundle.clone()),
+                );
+            }
+        }
+        for parent in entry.ancestors().skip(1) {
+            blocked.extend(root_owners.get(parent).into_iter().flatten().cloned());
+        }
+        for bundle in blocked {
+            if !failed.contains(&bundle) {
+                bundle_failure(
+                    report,
+                    failed,
+                    &bundle,
+                    anyhow::anyhow!(
+                        "skill destination overlaps existing ownership at {}",
+                        entry.display()
+                    ),
+                );
+            }
+        }
+    }
+    Ok(routes
         .into_iter()
         .filter_map(|(path, candidates)| {
             candidates
@@ -312,20 +352,21 @@ fn select_routes(
                 .find(|r| !failed.contains(&r.owner.bundle))
                 .map(|r| (path, r))
         })
-        .collect()
+        .collect())
 }
 
 /// Retain a durable ownership superset until link application and pruning finish.
 /// Every intermediate state can be reconciled by the next ordinary sync.
 fn save_intent(
-    previous: &[PriorLink],
+    previous: &state::Manifest,
     routes: &BTreeMap<PathBuf, Route>,
     state_dir: &Path,
 ) -> Result<()> {
     let mut owned = BTreeMap::new();
     for link in previous
+        .links
         .iter()
-        .map(|prior| prior.owner.clone())
+        .cloned()
         .chain(routes.values().map(|r| r.owner.clone()))
     {
         owned.insert((link.path.clone(), link.bundle.clone()), link);
@@ -405,7 +446,10 @@ pub fn sync_with_progress(
             Err(error) => bundle_failure(&mut report, &mut failed, &name, error),
         }
     }
-    let routes = select_routes(routes, &previous, bundles, &mut failed, &mut report);
+    let routes = match select_routes(routes, &previous, bundles, &mut failed, &mut report) {
+        Ok(routes) => routes,
+        Err(error) => return state_failure(error),
+    };
     if let Err(error) = save_intent(&previous, &routes, state_dir) {
         return state_failure(error);
     }
@@ -464,7 +508,10 @@ pub fn sync_worktree(
             bundle_failure(&mut report, &mut failed, name, error);
         }
     }
-    let routes = select_routes(routes, &previous, bundles, &mut failed, &mut report);
+    let routes = match select_routes(routes, &previous, bundles, &mut failed, &mut report) {
+        Ok(routes) => routes,
+        Err(error) => return state_failure(error),
+    };
     if let Err(error) = save_intent(&previous, &routes, state_dir) {
         return state_failure(error);
     }
@@ -473,7 +520,7 @@ pub fn sync_worktree(
 
 fn apply_routes(
     mut report: SyncReport,
-    previous: &[PriorLink],
+    previous: &state::Manifest,
     routes: BTreeMap<PathBuf, Route>,
     mut failed: BTreeSet<String>,
     cache: &Path,
@@ -517,12 +564,12 @@ fn apply_routes(
     }
     let current: HashSet<_> = managed.iter().map(|link| link.path.clone()).collect();
     let retained: HashSet<_> = previous
+        .links
         .iter()
-        .filter(|prior| failed.contains(&prior.owner.bundle))
-        .map(|prior| &prior.owner.path)
+        .filter(|owner| failed.contains(&owner.bundle))
+        .map(|owner| &owner.path)
         .collect();
-    for prior in previous {
-        let old = &prior.owner;
+    for old in &previous.links {
         if current.contains(&old.path) {
             continue;
         }

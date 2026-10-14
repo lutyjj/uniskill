@@ -45,7 +45,7 @@ Modules own narrow jobs:
 | `linker.rs` | Harness symlink creation and status classification |
 | `skill.rs` | Shared skill-directory predicate |
 | `state.rs` | Manifest load/save and managed-link ownership checks |
-| `sync.rs` | Sync orchestration and structured reports |
+| `sync.rs` | Skill planning, exposed-root checks, reconciliation, and reports |
 | `worktree.rs` | Git worktree topology, retargeting, and physical destination scope |
 
 Do not move filesystem mutation, output formatting, and config parsing into the
