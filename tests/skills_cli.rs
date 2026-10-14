@@ -64,6 +64,18 @@ impl Fixture {
             .unwrap();
     }
 
+    fn reset_git_caches_with_head_alias(&self) {
+        for entry in fs::read_dir(self.path("cache/uniskill/repos")).unwrap() {
+            let repo = entry.unwrap().path();
+            success(self.git(&repo, &["checkout", "-q", "main"]));
+            success(self.git(&repo, &["update-ref", "-d", "refs/heads/head"]));
+            let alias = repo.join(".git/head");
+            if !alias.exists() {
+                std::os::unix::fs::symlink("HEAD", alias).unwrap();
+            }
+        }
+    }
+
     fn git(&self, dir: &Path, args: &[&str]) -> Output {
         self.command("git")
             .arg("-C")
@@ -1637,6 +1649,9 @@ repo = "./origin"
 [bundles.one.skills.explicit]
 repo = "./origin"
 ref = "head"
+[bundles.one.skills.qualified]
+repo = "./origin"
+ref = "refs/heads/head"
 "#,
         );
         success(f.run(&config, &["--jobs", jobs]));
@@ -1644,10 +1659,78 @@ ref = "head"
             fs::read_to_string(f.path("target/default/SKILL.md")).unwrap(),
             "default branch"
         );
+        for name in ["explicit", "qualified"] {
+            assert_eq!(
+                fs::read_to_string(f.path(&format!("target/{name}/SKILL.md"))).unwrap(),
+                "explicit head branch"
+            );
+        }
+        f.reset_git_caches_with_head_alias();
+        success(f.git(&origin, &["checkout", "-q", "head"]));
+        f.skill("origin", "updated head branch");
+        success(f.git(&origin, &["commit", "-qam", "updated head fixture"]));
+        success(f.git(&origin, &["checkout", "-q", "main"]));
+        success(f.run(&config, &["--jobs", jobs]));
         assert_eq!(
-            fs::read_to_string(f.path("target/explicit/SKILL.md")).unwrap(),
-            "explicit head branch"
+            fs::read_to_string(f.path("target/default/SKILL.md")).unwrap(),
+            "default branch"
         );
+        for name in ["explicit", "qualified"] {
+            assert_eq!(
+                fs::read_to_string(f.path(&format!("target/{name}/SKILL.md"))).unwrap(),
+                "updated head branch"
+            );
+        }
+        success(f.git(&origin, &["branch", "-D", "head"]));
+        assert!(!f.run(&config, &["--jobs", jobs]).status.success());
+        for name in ["explicit", "qualified"] {
+            assert_eq!(
+                fs::read_to_string(f.path(&format!("target/{name}/SKILL.md"))).unwrap(),
+                "updated head branch"
+            );
+        }
+    }
+}
+
+#[test]
+fn git_tags_and_commit_ids_keep_their_selected_contents() {
+    let f = Fixture::new();
+    let origin = f.repo("origin");
+    f.skill("origin", "selected commit");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "selected"]));
+    success(f.git(&origin, &["tag", "-a", "head", "-m", "selected tag"]));
+    let commit = String::from_utf8(f.git(&origin, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    f.skill("origin", "default branch");
+    success(f.git(&origin, &["commit", "-qam", "default"]));
+    let mut text =
+        "[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\n"
+            .to_string();
+    for (name, reference) in [
+        ("tag", "head"),
+        ("qualified-tag", "refs/tags/head"),
+        ("commit", &commit),
+        ("short-commit", &commit[..12]),
+    ] {
+        text.push_str(&format!(
+            "[bundles.one.skills.{name}]\nrepo='./origin'\nref={reference:?}\n"
+        ));
+    }
+    let config = f.write("config.toml", text);
+    for alias in [false, true] {
+        if alias {
+            f.reset_git_caches_with_head_alias();
+        }
+        success(f.run(&config, &[]));
+        for name in ["tag", "qualified-tag", "commit", "short-commit"] {
+            assert_eq!(
+                fs::read_to_string(f.path(&format!("target/{name}/SKILL.md"))).unwrap(),
+                "selected commit"
+            );
+        }
     }
 }
 

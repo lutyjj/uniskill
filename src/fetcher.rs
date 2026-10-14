@@ -403,10 +403,8 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
     }
 
     if let Some(requested_ref) = git_ref {
-        run_git(&repo_dir, &["checkout", "--quiet", requested_ref])?;
-        if checked_out_branch(&repo_dir)?.is_some() {
-            run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "@{upstream}"])?;
-        }
+        let commit = resolve_git_ref(&repo_dir, requested_ref)?;
+        run_git(&repo_dir, &["checkout", "--quiet", "--detach", &commit])?;
     } else {
         run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "@{upstream}"])?;
     }
@@ -506,15 +504,15 @@ fn run_git(repo_dir: &Path, args: &[&str]) -> Result<()> {
     for arg in args {
         command.arg(arg);
     }
-    run_command(&mut command)
+    run_command(&mut command).map(|_| ())
 }
 
-fn run_command(command: &mut Command) -> Result<()> {
+fn run_command(command: &mut Command) -> Result<std::process::Output> {
     let output = command
         .output()
         .with_context(|| format!("failed to start {:?}", command))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -527,25 +525,44 @@ fn run_command(command: &mut Command) -> Result<()> {
     ))
 }
 
-fn checked_out_branch(repo_dir: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to inspect checked-out branch in {}",
-                repo_dir.display()
-            )
-        })?;
-
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(Some(branch))
+fn resolve_git_ref(repo_dir: &Path, requested_ref: &str) -> Result<String> {
+    // Enumerate exact names so metadata aliases cannot shadow branches or tags.
+    let output = run_command(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["for-each-ref", "--format=%(refname)%09%(objectname)"]),
+    )?;
+    let references = String::from_utf8(output.stdout)?;
+    let candidates = if let Some(branch) = requested_ref.strip_prefix("refs/heads/") {
+        vec![format!("refs/remotes/origin/{branch}")]
+    } else if requested_ref.starts_with("refs/") {
+        vec![requested_ref.to_string()]
     } else {
-        Ok(None)
-    }
+        vec![
+            format!("refs/remotes/origin/{requested_ref}"),
+            format!("refs/tags/{requested_ref}"),
+        ]
+    };
+    let named = candidates.iter().find_map(|candidate| {
+        references.lines().find_map(|line| {
+            let (name, object) = line.split_once('\t')?;
+            (name == candidate).then_some(object)
+        })
+    });
+    let revision = match named {
+        Some(object) => object,
+        None if requested_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) => requested_ref,
+        None => anyhow::bail!("git ref not found: {requested_ref}"),
+    };
+    let output = run_command(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["rev-parse", "--verify", "--end-of-options"])
+            .arg(format!("{revision}^{{commit}}")),
+    )?;
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 /// Download a single skill URL to the destination path.

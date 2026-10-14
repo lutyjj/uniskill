@@ -111,8 +111,11 @@ ref = "main"
 path = "bundles/generic/skills/technical-writing"
 ```
 
-uniskill clones or fetches the repository into the cache, checks out `ref` when
-provided, and copies the selected skill directory into the assembled bundle.
+uniskill clones or fetches the repository into the cache and copies the selected
+skill directory into the assembled bundle. Explicit branches and tags resolve
+by exact ref name to commit IDs before checkout, so filesystem aliases cannot
+select a different revision. An explicit `ref` uses a detached checkout; an
+omitted `ref` follows the clone's upstream branch.
 
 GitHub shorthands (`owner/repo`, `gh:owner/repo`, `github:owner/repo`) resolve
 to SSH URLs. Plain SSH, HTTPS, and local git paths are passed through.
