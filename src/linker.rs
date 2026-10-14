@@ -125,6 +125,7 @@ mod tests {
         let result = ensure_skill_symlink(&source, &target);
 
         assert_eq!(result.status, SyncStatus::Created);
+        assert_eq!(fs::read_link(&target).unwrap(), source);
         assert!(target.is_symlink());
 
         // Running again should be Idempotent (Ok)
@@ -169,6 +170,7 @@ mod tests {
         let result = ensure_skill_symlink(&new_source, &target_link);
 
         assert_eq!(result.status, SyncStatus::Updated);
+        assert_eq!(fs::read_link(&target_link).unwrap(), new_source);
     }
 
     #[test]
@@ -182,6 +184,7 @@ mod tests {
 
         let result = ensure_skill_symlink(&source, &target);
         assert!(matches!(result.status, SyncStatus::Conflict(_)));
+        assert_eq!(fs::read(&target).unwrap(), b"not a symlink");
     }
 
     #[test]
@@ -193,5 +196,6 @@ mod tests {
         let result = ensure_skill_symlink(&non_existent_source, &target);
 
         assert_eq!(result.status, SyncStatus::Broken);
+        assert!(fs::symlink_metadata(&target).is_err());
     }
 }

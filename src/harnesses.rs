@@ -73,25 +73,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_registry_has_known_harnesses() {
-        let registry = default_harnesses();
-        assert!(registry.contains_key("pi"));
-        assert!(registry.contains_key("claude-code"));
-    }
-
-    #[test]
-    fn test_custom_registry_override() {
-        let mut registry = HashMap::new();
-        registry.insert(
-            "pi".to_string(),
-            HarnessDef {
-                label: "Pi (custom)".to_string(),
-                pattern: Some("/custom/agents/skills/{name}".to_string()),
-                mcp: None,
-            },
-        );
-        let pi = registry.get("pi");
-        assert!(pi.is_some());
-        assert_eq!(pi.unwrap().label, "Pi (custom)");
+    fn registry_preserves_builtins_and_applies_user_overrides() {
+        let config: crate::config::Config = toml::from_str("[harnesses.pi]\nlabel='Custom Pi'\npattern='/custom/{name}'\n[harnesses.new]\npattern='/new/{name}'").unwrap();
+        let result = registry(&config).unwrap();
+        assert_eq!(result["pi"].label, "Custom Pi");
+        assert_eq!(result["pi"].pattern.as_deref(), Some("/custom/{name}"));
+        assert_eq!(result["new"].pattern.as_deref(), Some("/new/{name}"));
+        assert!(result.contains_key("claude-code"));
+        assert!(result.contains_key("codex"));
     }
 }

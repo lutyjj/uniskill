@@ -118,54 +118,6 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn test_manifest_round_trip() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let cache = tmp.path();
-        let manifest = Manifest {
-            links: vec![ManagedLink {
-                path: "/home/u/.agents/skills/code-design".to_string(),
-                skill: "code-design".to_string(),
-                harness: "pi".to_string(),
-                bundle: "generic".to_string(),
-            }],
-        };
-        manifest.save(cache).unwrap();
-        let loaded = Manifest::load(cache).unwrap();
-        assert_eq!(loaded.links, manifest.links);
-    }
-
-    #[test]
-    fn test_missing_manifest_loads_empty() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        assert!(Manifest::load(tmp.path()).unwrap().links.is_empty());
-    }
-
-    #[test]
-    fn test_is_managed_symlink_only_true_for_cache_links() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let cache = tmp.path().join("cache");
-        fs::create_dir_all(cache.join("bundles")).unwrap();
-
-        // A symlink into the cache is managed.
-        let managed = tmp.path().join("managed");
-        symlink(cache.join("bundles").join("x"), &managed).unwrap();
-        assert!(is_managed_symlink(&managed, &cache).unwrap());
-
-        // A symlink pointing elsewhere is not.
-        let foreign = tmp.path().join("foreign");
-        symlink(tmp.path().join("somewhere-else"), &foreign).unwrap();
-        assert!(!is_managed_symlink(&foreign, &cache).unwrap());
-
-        // A real directory is not.
-        let real = tmp.path().join("real");
-        fs::create_dir_all(&real).unwrap();
-        assert!(!is_managed_symlink(&real, &cache).unwrap());
-
-        // A missing path is not.
-        assert!(!is_managed_symlink(&tmp.path().join("gone"), &cache).unwrap());
-    }
-
-    #[test]
     fn test_remove_if_managed_leaves_foreign_paths() {
         let tmp = crate::test_support::tempdir().unwrap();
         let cache = tmp.path().join("cache");

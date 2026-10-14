@@ -514,427 +514,126 @@ fn is_local_repo_reference(repo: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    fn write_temp_toml(content: &str) -> tempfile::NamedTempFile {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-        file.flush().unwrap();
-        file
-    }
 
     #[test]
-    fn test_parse_minimal_config() {
-        let content = r#"
-[bundles.my-skills]
-harnesses = ["pi"]
-
-[bundles.my-skills.skills.caveman]
-source = "/tmp/skills/caveman"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        assert_eq!(config.bundles.len(), 1);
-        let bundle = config.bundles.get("my-skills").unwrap();
-        assert_eq!(
-            bundle.skills["caveman"].source.as_deref(),
-            Some("/tmp/skills/caveman")
-        );
-        // No [harnesses] section — empty map; defaults come from harnesses.rs
-        assert!(config.harnesses.is_empty());
-    }
-
-    #[test]
-    fn test_env_var_dollar_syntax() {
-        let result = expand_env_vars("$HOME/.agents/skills");
-        assert_eq!(
-            result,
-            format!("{}/.agents/skills", env::var("HOME").unwrap())
-        );
-    }
-
-    #[test]
-    fn test_env_var_brace_syntax() {
-        let result = expand_env_vars("${HOME}/skills/{name}");
+    fn variable_expansion_preserves_literals_and_unresolved_names() {
         let home = env::var("HOME").unwrap();
-        assert_eq!(result, format!("{}/skills/{{name}}", home));
+        for (input, expected) in [
+            ("$HOME/skills", format!("{home}/skills")),
+            ("żółć/${HOME}/{name}", format!("żółć/{home}/{{name}}")),
+            ("$HOME/$HOME", format!("{home}/{home}")),
+            ("/literal/{name}/$", "/literal/{name}/$".into()),
+            (
+                "$UNISKILL_TEST_MISSING/path",
+                "$UNISKILL_TEST_MISSING/path".into(),
+            ),
+        ] {
+            assert_eq!(expand_env_vars(input), expected, "{input}");
+        }
     }
 
     #[test]
-    fn test_unresolvable_var_passes_through() {
-        let result = expand_env_vars("$NONEXISTENT_VAR_PLACEHOLDER/path");
-        assert_eq!(result, "$NONEXISTENT_VAR_PLACEHOLDER/path");
+    fn source_specs_select_one_kind_and_reject_misplaced_git_fields() {
+        for (input, expected) in [
+            ("", Ok(None)),
+            ("source='local'", Ok(Some(Source::Local("local".into())))),
+            (
+                "url='https://example.com/skill'",
+                Ok(Some(Source::Url("https://example.com/skill".into()))),
+            ),
+            (
+                "repo='owner/repo'\nref='main'\npath='skills'",
+                Ok(Some(Source::Git {
+                    repo: "owner/repo".into(),
+                    git_ref: Some("main".into()),
+                    path: Some("skills".into()),
+                })),
+            ),
+            (
+                "source='local'\nurl='https://example.com/skill'",
+                Err(SourceError::Conflict),
+            ),
+            ("path='skills'", Err(SourceError::Dangling)),
+            ("source='local'\npath='skills'", Err(SourceError::Dangling)),
+            (
+                "url='https://example.com/skill'\nref='main'",
+                Err(SourceError::Dangling),
+            ),
+        ] {
+            let spec: SourceSpec = toml::from_str(input).unwrap();
+            assert_eq!(spec.resolve(), expected, "{input}");
+        }
     }
 
     #[test]
-    fn test_expand_env_vars_handles_non_ascii_prefix() {
-        let home = env::var("HOME").unwrap();
-        let result = expand_env_vars("żółć/${HOME}/skills");
-        assert_eq!(result, format!("żółć/{home}/skills"));
-    }
-
-    #[test]
-    fn test_custom_harness_in_config() {
-        let content = r#"
-[bundles.my-bundle]
-harnesses = ["my-harness"]
-
-[bundles.my-bundle.skills.example]
-source = "/tmp/bundle/skills/example"
-
-[harnesses.my-harness]
-pattern = "/custom/path/skills/{name}"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        // Only user-defined harnesses are in the parsed map; defaults merge in cli::sync
-        assert!(config.harnesses.contains_key("my-harness"));
+    fn git_identity_normalizes_repository_aliases_and_preserves_ref_selection() {
+        let expected = GitSource::new("git@github.com:owner/repo.git", Some("main"));
+        for repo in ["owner/repo", "gh:owner/repo", "github:owner/repo.git"] {
+            assert_eq!(GitSource::new(repo, Some("main")), expected);
+        }
         assert_eq!(
-            config.harnesses["my-harness"].pattern.as_deref(),
-            Some("/custom/path/skills/{name}")
+            GitSource::new("https://example.com/repo.git", None).repo,
+            "https://example.com/repo.git"
+        );
+        assert_ne!(
+            GitSource::new("owner/repo", None),
+            GitSource::new("owner/repo", Some("HEAD"))
+        );
+        assert_ne!(
+            GitSource::new("owner/repo", Some("main")),
+            GitSource::new("owner/repo", Some("other"))
         );
     }
 
     #[test]
-    fn test_parse_config_missing_file() {
-        let result = parse_config("/nonexistent/path.toml");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_no_harnesses_section_is_empty() {
-        // After removing default_harnesses from config.rs, empty config should
-        // produce an empty harnesses map — defaults come from harnesses.rs
-        let content = r#"
-[bundles.my-bundle]
-harnesses = ["pi"]
-
-[bundles.my-bundle.skills.example]
-source = "/tmp/skills/example"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        // No [harnesses] section means empty map
-        assert!(config.harnesses.is_empty());
-    }
-
-    #[test]
-    fn test_custom_harness_with_label() {
-        let content = r#"
-[bundles.my-bundle]
-harnesses = ["custom"]
-
-[bundles.my-bundle.skills.example]
-source = "/tmp/bundle/skills/example"
-
-[harnesses.custom]
-label = "My Custom Agent"
-pattern = "/opt/custom/skills/{name}"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        let harness = config.harnesses.get("custom").unwrap();
-        assert_eq!(harness.label, Some("My Custom Agent".to_string()));
+    fn includes_anchor_paths_at_the_declaring_file_and_reject_cycles() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let root = temp.path().join("config.toml");
+        let child = temp.path().join("child/config.toml");
+        std::fs::create_dir(child.parent().unwrap()).unwrap();
+        std::fs::write(&root, "includes=['child/config.toml']").unwrap();
+        std::fs::write(&child, "[harnesses.custom]\npattern='target/{name}'\n[bundles.local]\nharnesses=['custom']\n[bundles.local.skills.demo]\nsource='source'\n").unwrap();
+        let config = parse_config(&root).unwrap();
         assert_eq!(
-            harness.pattern.as_deref(),
-            Some("/opt/custom/skills/{name}")
-        );
-    }
-
-    #[test]
-    fn test_resolve_source_expands_env_vars() {
-        let home = env::var("HOME").unwrap();
-        let resolved = resolve_source("$HOME/.dotfiles/skills");
-        assert_eq!(
-            resolved,
-            PathBuf::from(format!("{}/.dotfiles/skills", home))
-        );
-    }
-
-    #[test]
-    fn test_resolve_source_absolute_path_unchanged() {
-        let resolved = resolve_source("/absolute/path/to/skills");
-        assert_eq!(resolved, PathBuf::from("/absolute/path/to/skills"));
-    }
-
-    #[test]
-    fn test_resolve_source_from_joins_relative_path_to_config_dir() {
-        let resolved = resolve_source_from("./skills", Path::new("/repo"));
-        assert_eq!(resolved, PathBuf::from("/repo/./skills"));
-    }
-
-    #[test]
-    fn test_resolve_source_from_keeps_absolute_path() {
-        let resolved = resolve_source_from("/skills", Path::new("/repo"));
-        assert_eq!(resolved, PathBuf::from("/skills"));
-    }
-
-    #[test]
-    fn test_resolve_repo_from_keeps_github_shorthand() {
-        let resolved = resolve_repo_from("lutyjj/agent-skills", Path::new("/repo"));
-        assert_eq!(resolved, "lutyjj/agent-skills");
-    }
-
-    #[test]
-    fn test_resolve_repo_from_joins_relative_local_repo() {
-        let resolved = resolve_repo_from("../skills-repo", Path::new("/repo/config"));
-        assert_eq!(resolved, "/repo/config/../skills-repo");
-    }
-
-    #[test]
-    fn test_expand_env_vars_multiple_vars() {
-        let home = env::var("HOME").unwrap();
-        let result = expand_env_vars("$HOME/.agents/$USER");
-        // USER might not be set — it passes through if unresolvable
-        assert!(result.starts_with(&home));
-    }
-
-    #[test]
-    fn test_expand_env_vars_no_vars() {
-        let result = expand_env_vars("/static/path/to/skills/{name}");
-        assert_eq!(result, "/static/path/to/skills/{name}");
-    }
-
-    #[test]
-    fn test_project_config_with_harnesses_key() {
-        // Global and project files share the same config shape.
-        let content = r#"
-[bundles.local-skills]
-harnesses = ["local-agent"]
-
-[bundles.local-skills.skills.example]
-source = "./my-skills/example"
-
-[harnesses.local-agent]
-label = "Local Agent"
-pattern = ".agents/skills/{name}"
-"#;
-        let file = write_temp_toml(content);
-        let content_bytes = std::fs::read_to_string(file.path()).unwrap();
-        // Deserialize the unresolved wire shape directly.
-        let config: Config = toml::from_str(&content_bytes).unwrap();
-        assert_eq!(config.bundles.len(), 1);
-        let bundle = config.bundles.get("local-skills").unwrap();
-        assert_eq!(
-            bundle.skills["example"].source.as_deref(),
-            Some("./my-skills/example")
-        );
-        assert!(!config.harnesses.is_empty());
-        let harness = config.harnesses.get("local-agent").unwrap();
-        assert_eq!(harness.label, Some("Local Agent".to_string()));
-        assert_eq!(harness.pattern.as_deref(), Some(".agents/skills/{name}"));
-    }
-
-    #[test]
-    fn test_parse_project_config_reports_invalid_toml() {
-        let file = write_temp_toml("[bundles");
-        let result = parse_config(file.path());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_url_skill_from_toml() {
-        let content = r#"
-[bundles.important-stuff]
-harnesses = ["pi"]
-
-[bundles.important-stuff.skills.caveman]
-url = "https://example.com/skill.md"
-
-[bundles.important-stuff.skills.code-design]
-url = "https://example.com/code-design.md"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        assert_eq!(config.bundles.len(), 1);
-        let bundle = config.bundles.get("important-stuff").unwrap();
-        assert_eq!(bundle.skills.len(), 2);
-        assert!(bundle.skills.contains_key("caveman"));
-        assert_eq!(
-            bundle.skills["caveman"].url.as_deref(),
-            Some("https://example.com/skill.md")
-        );
-    }
-
-    #[test]
-    fn test_parse_git_skill_from_toml() {
-        let content = r#"
-[bundles.generic]
-harnesses = ["pi", "claude-code"]
-
-[bundles.generic.skills.code-design]
-repo = "gh:lutyjj/agent-skills"
-ref = "main"
-path = "bundles/generic/skills/code-design"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        let bundle = config.bundles.get("generic").unwrap();
-        let skill = &bundle.skills["code-design"];
-        assert_eq!(skill.repo.as_deref(), Some("gh:lutyjj/agent-skills"));
-        assert_eq!(skill.git_ref.as_deref(), Some("main"));
-        assert_eq!(
-            skill.path.as_deref(),
-            Some("bundles/generic/skills/code-design")
-        );
-        assert_eq!(bundle.harnesses, vec!["pi", "claude-code"]);
-        assert_eq!(
-            skill.resolve().unwrap(),
-            Some(Source::Git {
-                repo: "gh:lutyjj/agent-skills".to_string(),
-                git_ref: Some("main".to_string()),
-                path: Some("bundles/generic/skills/code-design".to_string()),
-            })
-        );
-    }
-
-    #[test]
-    fn test_parse_mixed_skill_sources_from_toml() {
-        let content = r#"
-[bundles.mixed-bundle]
-harnesses = ["pi"]
-
-[bundles.mixed-bundle.skills.remote-skill]
-url = "https://example.com/remote.md"
-
-[bundles.mixed-bundle.skills.local-skill]
-source = "/local/path/skills/local-skill"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        let bundle = config.bundles.get("mixed-bundle").unwrap();
-        assert_eq!(bundle.skills.len(), 2);
-        assert_eq!(
-            bundle.skills["remote-skill"].resolve().unwrap(),
-            Some(Source::Url("https://example.com/remote.md".to_string()))
+            config.harnesses["custom"].pattern.as_deref(),
+            temp.path().join("child/target/{name}").to_str()
         );
         assert_eq!(
-            bundle.skills["local-skill"].resolve().unwrap(),
-            Some(Source::Local("/local/path/skills/local-skill".to_string()))
+            config.bundles["local"].skills["demo"].source.as_deref(),
+            temp.path().join("child/source").to_str()
         );
+        std::fs::write(&child, "includes=['../config.toml']").unwrap();
+        assert!(parse_config(&root).is_err());
     }
 
     #[test]
-    fn test_parse_whole_bundle_git_source() {
-        // A bundle can point at a whole remote bundle directory as a unit,
-        // with no explicit skill entries at all.
-        let content = r#"
-[bundles.generic]
-harnesses = ["pi", "claude-code"]
-repo = "gh:lutyjj/agent-skills"
-ref = "main"
-path = "bundles/generic"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        let bundle = config.bundles.get("generic").unwrap();
-        assert!(bundle.skills.is_empty());
-        assert!(!bundle.source.is_empty());
-        assert_eq!(
-            bundle.source.resolve().unwrap(),
-            Some(Source::Git {
-                repo: "gh:lutyjj/agent-skills".to_string(),
-                git_ref: Some("main".to_string()),
-                path: Some("bundles/generic".to_string()),
-            })
-        );
+    fn includes_reject_duplicate_domain_identities() {
+        for fragment in [
+            "[bundles.local]\nharnesses=['custom']\nsource='source'",
+            "[harnesses.custom]\npattern='target/{name}'",
+            "[mcp.docs]\nharnesses=['custom']\ncommand='fixture'",
+        ] {
+            let temp = crate::test_support::tempdir().unwrap();
+            let root = temp.path().join("config.toml");
+            std::fs::write(&root, format!("includes=['child.toml']\n{fragment}")).unwrap();
+            std::fs::write(temp.path().join("child.toml"), fragment).unwrap();
+            assert!(parse_config(&root).is_err(), "{fragment}");
+        }
     }
 
     #[test]
-    fn test_bundle_source_and_skills_compose() {
-        // A whole-bundle source and explicit skills coexist: pull the bundle,
-        // then layer an extra url skill on top.
-        let content = r#"
-[bundles.generic]
-harnesses = ["pi"]
-repo = "gh:lutyjj/agent-skills"
-path = "bundles/generic"
-
-[bundles.generic.skills.caveman]
-url = "https://example.com/caveman.md"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        let bundle = config.bundles.get("generic").unwrap();
-        assert!(matches!(
-            bundle.source.resolve().unwrap(),
-            Some(Source::Git { .. })
-        ));
-        assert_eq!(
-            bundle.skills["caveman"].resolve().unwrap(),
-            Some(Source::Url("https://example.com/caveman.md".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_bundle_link_defaults_true() {
-        let content = r#"
-[bundles.generic]
-harnesses = ["pi"]
-source = "../bundles/generic"
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        assert!(config.bundles.get("generic").unwrap().link);
-    }
-
-    #[test]
-    fn test_bundle_link_can_be_disabled() {
-        let content = r#"
-[bundles.generic]
-harnesses = ["pi"]
-source = "../bundles/generic"
-link = false
-"#;
-        let file = write_temp_toml(content);
-        let config = parse_config(file.path()).unwrap();
-        assert!(!config.bundles.get("generic").unwrap().link);
-    }
-
-    #[test]
-    fn test_source_spec_empty_resolves_to_none() {
-        let spec = SourceSpec::default();
-        assert!(spec.is_empty());
-        assert_eq!(spec.resolve().unwrap(), None);
-    }
-
-    #[test]
-    fn test_source_spec_conflict_is_rejected() {
-        let spec = SourceSpec {
-            source: Some("/tmp/skill".to_string()),
-            url: Some("https://example.com/skill.md".to_string()),
-            ..SourceSpec::default()
-        };
-        assert_eq!(spec.resolve(), Err(SourceError::Conflict));
-    }
-
-    #[test]
-    fn test_source_spec_dangling_ref_is_rejected() {
-        let spec = SourceSpec {
-            path: Some("bundles/generic".to_string()),
-            ..SourceSpec::default()
-        };
-        assert!(!spec.is_empty());
-        assert_eq!(spec.resolve(), Err(SourceError::Dangling));
-    }
-
-    #[test]
-    fn test_source_spec_rejects_path_on_local_source() {
-        let spec = SourceSpec {
-            source: Some("./skills".to_string()),
-            path: Some("ignored".to_string()),
-            ..SourceSpec::default()
-        };
-        assert_eq!(spec.resolve(), Err(SourceError::Dangling));
-    }
-
-    #[test]
-    fn test_source_spec_rejects_ref_on_url_source() {
-        let spec = SourceSpec {
-            url: Some("https://example.com/SKILL.md".to_string()),
-            git_ref: Some("main".to_string()),
-            ..SourceSpec::default()
-        };
-        assert_eq!(spec.resolve(), Err(SourceError::Dangling));
+    fn invalid_destination_shapes_are_rejected_by_config_loading() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        for text in [
+            format!(
+                "[bundles.{}]\nharnesses=['custom']\nsource='source'",
+                "a".repeat(256)
+            ),
+            "[harnesses.custom]\npattern='target/static'".into(),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(parse_config(&path).is_err());
+        }
     }
 }

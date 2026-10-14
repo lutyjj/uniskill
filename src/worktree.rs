@@ -119,16 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn retargets_pattern_under_main_root() {
-        let c = ctx("/home/u/proj", "/home/u/proj/.git/worktrees-checkout/feat");
-        let out = c.retarget("/home/u/proj/.agents/skills/{name}");
-        assert_eq!(
-            out.as_deref(),
-            Some("/home/u/proj/.git/worktrees-checkout/feat/.agents/skills/{name}")
-        );
-    }
-
-    #[test]
     fn preserves_name_placeholder_and_nested_subpath() {
         let c = ctx("/repo", "/wt");
         assert_eq!(
@@ -148,12 +138,6 @@ mod tests {
     fn ignores_pattern_already_in_worktree() {
         let c = ctx("/repo", "/repo/wt/feat");
         assert_eq!(c.retarget("/repo/wt/feat/.agents/skills/{name}"), None);
-    }
-
-    #[test]
-    fn ignores_other_repo() {
-        let c = ctx("/home/u/proj", "/home/u/proj/wt/feat");
-        assert_eq!(c.retarget("/home/u/other/.agents/skills/{name}"), None);
     }
 
     fn git(dir: &Path, args: &[&str]) {

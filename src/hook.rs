@@ -302,82 +302,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sync_command_bakes_config_absolutely() {
-        let cmd = build_sync_command("/usr/bin/uniskill", Some(Path::new("/home/u/g.toml")));
-        assert_eq!(
-            cmd,
-            "'/usr/bin/uniskill' --config '/home/u/g.toml' sync --worktree"
-        );
-    }
-
-    #[test]
-    fn sync_command_without_config() {
-        let cmd = build_sync_command("/usr/bin/uniskill", None);
-        assert_eq!(cmd, "'/usr/bin/uniskill' sync --worktree");
-    }
-
-    #[test]
-    fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-    }
-
-    #[test]
-    fn local_hook_only_runs_on_null_prev_ref() {
-        let body = local_hook("'uniskill' sync --worktree");
-        assert!(body.contains(MARKER));
-        // Non-zero previous ref (an ordinary checkout) exits before syncing.
-        assert!(body.contains("*[!0]* ) exit 0"));
-        assert!(body.contains("sync --worktree"));
-    }
-
-    #[test]
-    fn global_dispatch_chains_to_local_hook() {
-        let body = global_dispatch("'uniskill' sync --worktree");
-        assert!(body.contains(MARKER));
-        // Only post-checkout triggers uniskill.
-        assert!(body.contains("if [ \"$_hook\" = \"post-checkout\" ]"));
-        // Repo-local hooks of any name are still chained.
-        assert!(body.contains("exec \"$_local\" \"$@\""));
-        // And never re-execs itself.
-        assert!(body.contains("\"$_local\" != \"$0\""));
-    }
-
-    #[test]
-    fn install_local_refuses_to_clobber_foreign_hook() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let hooks = tmp.path();
-        let target = hooks.join("post-checkout");
-        let foreign = "#!/bin/sh\necho mine\n";
-        fs::write(&target, foreign).unwrap();
-
-        install_local_at(hooks, "'uniskill' sync --worktree").unwrap();
-
-        // The user's hook is left byte-for-byte intact.
-        assert_eq!(fs::read_to_string(&target).unwrap(), foreign);
-    }
-
-    #[test]
-    fn install_local_writes_managed_hook_when_absent() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let hooks = tmp.path();
-
-        install_local_at(hooks, "'uniskill' sync --worktree").unwrap();
-
-        let body = fs::read_to_string(hooks.join("post-checkout")).unwrap();
-        assert!(body.contains(MARKER));
-        assert!(body.contains("sync --worktree"));
-    }
-
-    #[test]
-    fn install_local_refreshes_its_own_hook() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let hooks = tmp.path();
-
-        install_local_at(hooks, "'uniskill' sync --worktree").unwrap();
-        // A second install with a new command replaces the managed hook.
-        install_local_at(hooks, "'uniskill' --config '/g.toml' sync --worktree").unwrap();
-
-        let body = fs::read_to_string(hooks.join("post-checkout")).unwrap();
-        assert!(body.contains("--config '/g.toml'"));
+    fn installed_hooks_preserve_arguments_and_only_sync_initial_checkouts() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let recorder = temp.path().join("recorder's script");
+        write_executable(
+            &recorder,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$UNISKILL_HOOK_ARGS\"\n",
+        )
+        .unwrap();
+        let config = temp.path().join("config with 'quotes'.toml");
+        for global in [false, true] {
+            let hooks = temp.path().join(if global { "global" } else { "local" });
+            fs::create_dir(&hooks).unwrap();
+            let hook = hooks.join("post-checkout");
+            let record = hooks.join("args");
+            let run = |previous: &str| {
+                let output = Command::new(&hook)
+                    .arg(previous)
+                    .args(["new", "1"])
+                    .env_clear()
+                    .env("PATH", std::env::var_os("PATH").unwrap())
+                    .env("HOME", temp.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("UNISKILL_HOOK_ARGS", &record)
+                    .current_dir(temp.path())
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+            };
+            for configured in [true, false] {
+                let command = build_sync_command(
+                    recorder.to_str().unwrap(),
+                    configured.then_some(config.as_path()),
+                );
+                if global {
+                    write_executable(&hook, &global_dispatch(&command)).unwrap();
+                } else {
+                    install_local_at(&hooks, &command).unwrap();
+                }
+                for previous in ["", "abcd"] {
+                    run(previous);
+                    assert!(!record.exists());
+                }
+                run(&"0".repeat(40));
+                let expected = if configured {
+                    format!("--config\n{}\nsync\n--worktree\n", config.display())
+                } else {
+                    "sync\n--worktree\n".into()
+                };
+                assert_eq!(fs::read_to_string(&record).unwrap(), expected);
+                fs::remove_file(&record).unwrap();
+            }
+        }
     }
 }

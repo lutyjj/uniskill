@@ -542,3 +542,6 @@ fn plan(
     }
     Ok(Plan { updates, report })
 }
+
+#[cfg(test)]
+mod tests;

@@ -200,6 +200,9 @@ url = "http://{address}/two"
         let prepared = prepare(&config.bundles, temp.path(), 2, &mut |_| {});
         handler.join().unwrap();
         assert_eq!(prepared.sources.len(), 2);
-        assert!(prepared.sources.values().all(Result::is_ok));
+        for name in ["one", "two"] {
+            let path = prepared.url(&format!("http://{address}/{name}")).unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), b"---\nname: fixture\n---\n");
+        }
     }
 }

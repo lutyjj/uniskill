@@ -275,3 +275,33 @@ impl Server {
         Ok(Value::Object(rendered))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_mappings_and_options_cannot_replace_connection_semantics() {
+        let source = "harnesses=['fixture']\nurl='https://example.com/mcp'\n[headers]\nAuthorization='literal'\n";
+        let target = "path='native.json'\nformat='json'\ntable=['servers']\n";
+        let server: Server = toml::from_str(source).unwrap();
+        let plain: Target = toml::from_str(target).unwrap();
+        assert_eq!(
+            server.render(&plain, "fixture").unwrap(),
+            serde_json::json!({"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"literal"}})
+        );
+        for (mapping, options) in [
+            ("omit=['url']", ""),
+            ("fields={typo='url'}", ""),
+            ("fields={type='url'}", ""),
+            (
+                "fields={env_headers='env_http_headers'}",
+                "[options.fixture.env_http_headers]\nAuthorization='TOKEN'",
+            ),
+        ] {
+            let server: Server = toml::from_str(&format!("{source}\n{options}")).unwrap();
+            let target: Target = toml::from_str(&format!("{target}\n{mapping}")).unwrap();
+            assert!(server.render(&target, "fixture").is_err(), "{mapping}");
+        }
+    }
+}

@@ -89,17 +89,16 @@ only in `src/harnesses.toml`.
 Build filesystem fixtures with `tests/support/mod.rs`; add explicit symlinks for
 alias cases.
 
-Tests should prove behavior, ownership, and failure modes. Add regression tests
-for any change that affects:
+Define test scope by the behavior it proves, not by its Cargo test target:
 
-- cache replacement
-- pruning
-- symlink conflict handling
-- source validation
-- git fetch/update behavior
-- release or CI contracts
+- Configuration, source selection, rendering policy, and path retargeting are behavioral units. Test their stable interfaces and independently derived outcomes.
+- Git, HTTP, filesystem, and generated-hook checks are boundary tests even when located inside `src/`. Use real disposable resources where native semantics matter.
+- `tests/*_cli.rs` contains application workflows. Keep essential install/update/prune, ownership, preservation, and recovery wiring here; put decision matrices at their owning boundary.
+- `tests/release.rs` executes the release validator against controlled Git histories.
 
-Do not write tests that only mirror implementation details.
+Retain a regression when it protects a distinct failure mechanism. Delete no-op, source-text, library-mechanics, and redundant scenarios. Do not add a test per helper or repeat every boundary case through the CLI. Compatible internal refactors should ordinarily preserve behavioral assertions.
+
+Assertions must verify the claimed effect. A successful exit, a status enum, or a file's existence alone does not establish correct contents, preservation, ownership, or idempotency. Keep fixtures small and execution environments independent of operator credentials and configuration.
 
 ## Run the checks
 

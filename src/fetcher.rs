@@ -8,29 +8,6 @@ use anyhow::{Context, Result};
 
 use crate::config::{Bundle, GitSource, Source, SourceSpec};
 
-/// Assemble a bundle into `cache_dir/bundles/<name>/skills/`.
-///
-/// Two composable layers land in the same `skills/` directory:
-/// 1. the whole-bundle `source`, whose own `skills/*` are placed in as a unit;
-/// 2. explicit per-skill entries, which add to or override those by name.
-///
-/// A local `source` is placed by symlink when `bundle.link` (the default), so
-/// edits flow both ways between harness and working tree; remote `repo` and
-/// `url` sources are always copied — they have no working tree to link.
-#[cfg(test)]
-pub fn assemble_bundle(
-    bundle_name: &str,
-    bundle: &Bundle,
-    cache_dir: &Path,
-    source_base_dir: &Path,
-) -> Result<PathBuf> {
-    let mut bundle = bundle.clone();
-    crate::config::anchor_bundle_paths(&mut bundle, source_base_dir);
-    let bundles = std::collections::HashMap::from([(bundle_name.into(), bundle.clone())]);
-    let prepared = crate::fetch_plan::prepare(&bundles, cache_dir, 4, &mut |_| {});
-    stage_bundle(bundle_name, &bundle, cache_dir, &prepared)?.publish()
-}
-
 pub struct StagedBundle {
     pub paths: crate::cache::BundlePaths,
 }
@@ -699,44 +676,66 @@ pub(crate) fn cache_url(url: &str, cache: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    fn assemble_bundle(
+        bundle_name: &str,
+        bundle: &Bundle,
+        cache_dir: &Path,
+        source_base_dir: &Path,
+    ) -> Result<PathBuf> {
+        let mut bundle = bundle.clone();
+        crate::config::anchor_bundle_paths(&mut bundle, source_base_dir);
+        let bundles = std::collections::HashMap::from([(bundle_name.into(), bundle.clone())]);
+        let prepared = crate::fetch_plan::prepare(&bundles, cache_dir, 4, &mut |_| {});
+        stage_bundle(bundle_name, &bundle, cache_dir, &prepared)?.publish()
+    }
+
     #[test]
-    fn maximum_length_bundle_keys_install_update_and_recover() {
-        for length in [245, 246, 255] {
-            let temp = crate::test_support::tempdir().unwrap();
-            let name = "a".repeat(length);
-            let source = temp.path().join("source");
-            write_skill_dir(&source.join("skills/demo"), "first");
-            let mut bundle = bundle_with(
-                SourceSpec {
-                    source: Some(source.to_string_lossy().into_owned()),
-                    ..SourceSpec::default()
-                },
-                &[],
-            );
-            bundle.link = false;
-            let cache = temp.path().join("cache");
-            let root = assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
-            fs::write(source.join("skills/demo/SKILL.md"), "updated").unwrap();
-            assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
-            let backup = crate::cache::Layout::resolve(&cache)
-                .unwrap()
-                .bundle(&name)
-                .unwrap()
-                .previous;
-            assert!(backup.file_name().unwrap().len() <= 255);
-            fs::rename(&root, &backup).unwrap();
-            fs::remove_dir_all(&source).unwrap();
-            assert!(assemble_bundle(&name, &bundle, &cache, temp.path()).is_err());
-            assert_eq!(
-                fs::read_to_string(root.join("skills/demo/SKILL.md")).unwrap(),
-                "updated"
-            );
-            assert!(!backup.exists());
+    fn bundle_validation_rejects_invalid_source_contracts() {
+        for (text, valid) in [
+            ("harnesses=['fixture']\nsource='source'", true),
+            ("harnesses=['fixture']\nurl='https://example.com/skill'", false),
+            ("harnesses=['fixture']\nrepo='owner/repo'\npath='../outside'", false),
+            ("harnesses=['fixture']\nrepo='owner/repo'\npath='/outside'", false),
+            ("harnesses=['fixture']\n[skills.demo]\nsource='source'\nurl='https://example.com/skill'", false),
+        ] {
+            let bundle: Bundle = toml::from_str(text).unwrap();
+            assert_eq!(validate_bundle(&bundle).is_ok(), valid, "{text}");
         }
     }
 
-    fn normalized_repo(repo: &str) -> String {
-        GitSource::new(repo, None).repo
+    #[test]
+    fn maximum_length_bundle_keys_install_update_and_recover() {
+        let length = 255;
+        let temp = crate::test_support::tempdir().unwrap();
+        let name = "a".repeat(length);
+        let source = temp.path().join("source");
+        write_skill_dir(&source.join("skills/demo"), "first");
+        let mut bundle = bundle_with(
+            SourceSpec {
+                source: Some(source.to_string_lossy().into_owned()),
+                ..SourceSpec::default()
+            },
+            &[],
+        );
+        bundle.link = false;
+        let cache = temp.path().join("cache");
+        let root = assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
+        fs::write(source.join("skills/demo/SKILL.md"), "updated").unwrap();
+        assemble_bundle(&name, &bundle, &cache, temp.path()).unwrap();
+        let backup = crate::cache::Layout::resolve(&cache)
+            .unwrap()
+            .bundle(&name)
+            .unwrap()
+            .previous;
+        assert!(backup.file_name().unwrap().len() <= 255);
+        fs::rename(&root, &backup).unwrap();
+        fs::remove_dir_all(&source).unwrap();
+        assert!(assemble_bundle(&name, &bundle, &cache, temp.path()).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("skills/demo/SKILL.md")).unwrap(),
+            "updated"
+        );
+        assert!(!backup.exists());
     }
 
     fn fetch_git_repo(repo: &str, git_ref: Option<&str>, cache: &Path) -> Result<PathBuf> {
@@ -772,110 +771,9 @@ mod tests {
         run_git(dir, &["commit", "--quiet", "-m", "init"]).unwrap();
     }
 
-    fn local_skill_bundle(source: &Path) -> Bundle {
-        bundle_with(
-            SourceSpec::default(),
-            &[(
-                "code-design",
-                SourceSpec {
-                    source: Some(source.to_string_lossy().to_string()),
-                    ..SourceSpec::default()
-                },
-            )],
-        )
-    }
-
-    #[test]
-    fn test_assemble_bundle_copies_local_skill_when_link_false() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let base = tmp.path().join("cache");
-        let source = tmp.path().join("source").join("code-design");
-        fs::create_dir_all(source.join("agents")).unwrap();
-        fs::write(source.join("SKILL.md"), "---\nname: code-design\n---\n").unwrap();
-        fs::write(source.join("agents").join("openai.yaml"), "version: 1\n").unwrap();
-
-        let mut bundle = local_skill_bundle(&source);
-        bundle.link = false;
-
-        let bundle_root = assemble_bundle("generic", &bundle, &base, tmp.path()).unwrap();
-
-        let installed = bundle_root.join("skills").join("code-design");
-        // A copy: a real directory, not a symlink, with the companion file.
-        assert!(!installed
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(installed.join("SKILL.md").exists());
-        assert!(installed.join("agents").join("openai.yaml").exists());
-    }
-
-    #[test]
-    fn test_assemble_bundle_links_local_skill_by_default() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let base = tmp.path().join("cache");
-        let source = tmp.path().join("source").join("code-design");
-        write_skill_dir(&source, "code-design");
-
-        // Default bundle.link == true.
-        let bundle = local_skill_bundle(&source);
-        let bundle_root = assemble_bundle("generic", &bundle, &base, tmp.path()).unwrap();
-
-        let installed = bundle_root.join("skills").join("code-design");
-        // A live link: the assembled entry is a symlink at the source tree.
-        assert!(installed
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(
-            fs::read_link(&installed).unwrap(),
-            fs::canonicalize(&source).unwrap()
-        );
-
-        // Edits are bidirectional: writing through the link reaches the source.
-        fs::write(installed.join("SKILL.md"), "EDITED VIA HARNESS").unwrap();
-        assert_eq!(
-            fs::read_to_string(source.join("SKILL.md")).unwrap(),
-            "EDITED VIA HARNESS"
-        );
-    }
-
-    #[test]
-    fn test_assemble_bundle_failure_keeps_existing_cache() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let cache = tmp.path().join("cache");
-        let existing_skill = cache
-            .join("bundles")
-            .join("generic")
-            .join("skills")
-            .join("code-design");
-        write_skill_dir(&existing_skill, "old-code-design");
-
-        let invalid_source = tmp.path().join("invalid-bundle");
-        fs::create_dir_all(&invalid_source).unwrap();
-        let bundle = bundle_with(
-            SourceSpec {
-                source: Some(invalid_source.to_string_lossy().to_string()),
-                ..SourceSpec::default()
-            },
-            &[],
-        );
-
-        let result = assemble_bundle("generic", &bundle, &cache, tmp.path());
-
-        assert!(result.is_err());
-        assert_eq!(
-            fs::read_to_string(existing_skill.join("SKILL.md")).unwrap(),
-            "---\nname: old-code-design\n---\n"
-        );
-    }
-
     #[test]
     fn test_assemble_bundle_downloads_url_skill() {
-        let Some(url) = serve_once("# Remote Skill\n\nTest content") else {
-            return;
-        };
+        let url = serve_once("# Remote Skill\n\nTest content");
 
         let tmp = crate::test_support::tempdir().unwrap();
         let bundle = bundle_with(
@@ -900,48 +798,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content, "# Remote Skill\n\nTest content");
-    }
-
-    #[test]
-    fn test_assemble_bundle_pulls_whole_local_bundle_source() {
-        // Point a bundle at a local bundle directory; every skill under its
-        // skills/ folder is pulled as a unit, with no explicit entries.
-        let tmp = crate::test_support::tempdir().unwrap();
-        let src = tmp
-            .path()
-            .join("agent-skills")
-            .join("bundles")
-            .join("generic");
-        write_skill_dir(&src.join("skills").join("code-design"), "code-design");
-        write_skill_dir(
-            &src.join("skills").join("technical-writing"),
-            "technical-writing",
-        );
-        // A stray file under skills/ must be ignored (not a skill directory).
-        fs::write(src.join("skills").join("README.md"), "ignore me").unwrap();
-
-        let bundle = bundle_with(
-            SourceSpec {
-                source: Some(src.to_string_lossy().to_string()),
-                ..SourceSpec::default()
-            },
-            &[],
-        );
-
-        let bundle_root =
-            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
-
-        let skills = bundle_root.join("skills");
-        assert!(skills.join("code-design").join("SKILL.md").exists());
-        assert!(skills.join("technical-writing").join("SKILL.md").exists());
-        assert!(!skills.join("README.md").exists());
-        // Local whole-bundle source links live by default.
-        assert!(skills
-            .join("code-design")
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
     }
 
     #[test]
@@ -978,6 +834,10 @@ mod tests {
         let bundle_root =
             assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
 
+        assert_eq!(
+            fs::read_to_string(bundle_root.join("skills/code-design/SKILL.md")).unwrap(),
+            "---\nname: code-design\n---\n"
+        );
         // A git whole-bundle source is copied even with link on (default): the
         // git cache is not a working tree to link against.
         assert!(!bundle_root
@@ -1006,6 +866,8 @@ mod tests {
         let tmp = crate::test_support::tempdir().unwrap();
         let src = tmp.path().join("bundle");
         write_skill_dir(&src.join("skills").join("shared"), "from-source");
+        write_skill_dir(&src.join("skills/kept"), "kept");
+        fs::write(src.join("skills/README.md"), "ignore").unwrap();
 
         let override_dir = tmp.path().join("override").join("shared");
         fs::create_dir_all(&override_dir).unwrap();
@@ -1042,88 +904,13 @@ mod tests {
 
         let skills = bundle_root.join("skills");
         assert!(skills.join("caveman").join("SKILL.md").exists());
+        assert_eq!(
+            fs::read_to_string(skills.join("kept/SKILL.md")).unwrap(),
+            "---\nname: kept\n---\n"
+        );
+        assert!(!skills.join("README.md").exists());
         let shared = fs::read_to_string(skills.join("shared").join("SKILL.md")).unwrap();
         assert_eq!(shared, "OVERRIDDEN");
-    }
-
-    #[test]
-    fn test_assemble_bundle_rejects_url_bundle_source() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let bundle = bundle_with(
-            SourceSpec {
-                url: Some("https://example.com/SKILL.md".to_string()),
-                ..SourceSpec::default()
-            },
-            &[],
-        );
-
-        let result = assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_assemble_bundle_git_skill_defaults_to_repo_root() {
-        // A git skill without `path` resolves to the repo root as the skill dir.
-        let tmp = crate::test_support::tempdir().unwrap();
-        let repo = tmp.path().join("single-skill-repo");
-        write_skill_dir(&repo, "solo");
-        init_git_repo(&repo);
-
-        let bundle = bundle_with(
-            SourceSpec::default(),
-            &[(
-                "solo",
-                SourceSpec {
-                    repo: Some(repo.to_string_lossy().to_string()),
-                    ..SourceSpec::default()
-                },
-            )],
-        );
-
-        let bundle_root =
-            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
-        assert!(bundle_root
-            .join("skills")
-            .join("solo")
-            .join("SKILL.md")
-            .exists());
-    }
-
-    #[test]
-    fn test_download_skill_writes_content() {
-        let expected_body = "# My Skill\n\nTest content";
-        let Some(url) = serve_once(expected_body) else {
-            return;
-        };
-
-        let tmp = crate::test_support::tempdir().unwrap();
-        let dest = tmp.path().join("SKILL.md");
-
-        let result = download_skill(&url, &dest);
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(&dest).unwrap();
-        assert_eq!(content, expected_body);
-    }
-
-    #[test]
-    fn test_normalize_repo_url_supports_github_shorthand() {
-        assert_eq!(
-            normalized_repo("lutyjj/agent-skills"),
-            "git@github.com:lutyjj/agent-skills.git"
-        );
-        assert_eq!(
-            normalized_repo("gh:lutyjj/agent-skills"),
-            "git@github.com:lutyjj/agent-skills.git"
-        );
-        assert_eq!(
-            normalized_repo("github:lutyjj/agent-skills.git"),
-            "git@github.com:lutyjj/agent-skills.git"
-        );
-        assert_eq!(
-            normalized_repo("https://github.com/lutyjj/agent-skills.git"),
-            "https://github.com/lutyjj/agent-skills.git"
-        );
     }
 
     #[test]
@@ -1199,30 +986,45 @@ mod tests {
     }
 
     #[test]
-    fn url_cache_names_are_opaque_and_bounded_for_signed_urls() {
+    fn url_cache_keys_distinguish_credentials_without_exposing_them_in_paths() {
         let temp = crate::test_support::tempdir().unwrap();
-        for credential in [
-            "credential-marker".to_string(),
-            "credential-marker".repeat(30),
-        ] {
-            let Some(base) = serve_once("skill") else {
-                return;
-            };
-            let path = cache_url(&format!("{base}?token={credential}"), temp.path()).unwrap();
-            assert_eq!(fs::read(path).unwrap(), b"skill");
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr();
+        let responder = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let request = server
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .expect("download");
+                request
+                    .respond(tiny_http::Response::from_string("skill"))
+                    .unwrap();
+            }
+        });
+        let mut paths = Vec::new();
+        for token in ["credential-marker".into(), "credential-marker".repeat(30)] {
+            let path = cache_url(
+                &format!("http://{address}/skill?token={token}"),
+                temp.path(),
+            )
+            .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"skill");
+            let name = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(name.len() <= 255 && !name.contains("credential-marker"));
+            paths.push(path);
         }
-        let names: Vec<_> = fs::read_dir(temp.path().join("downloads"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        assert_eq!(names.len(), 2);
-        assert!(names
-            .iter()
-            .all(|name| name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())));
+        responder.join().unwrap();
+        assert_ne!(paths[0], paths[1]);
     }
 
     #[test]
-    fn test_fetch_git_repo_reports_failed_pull() {
+    fn mutable_git_updates_preserve_uncommitted_checkout_content() {
         let tmp = crate::test_support::tempdir().unwrap();
         let source_repo = tmp.path().join("source");
         write_skill_dir(&source_repo, "source");
@@ -1239,102 +1041,211 @@ mod tests {
         let result = fetch_git_repo(&source_repo.to_string_lossy(), None, &cache);
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_resolve_repo_path_rejects_escape() {
-        let repo = Path::new("/tmp/repo");
-        assert!(resolve_repo_path(repo, "../outside").is_err());
-        assert!(resolve_repo_path(repo, "/outside").is_err());
         assert_eq!(
-            resolve_repo_path(repo, "bundles/generic/skills/code-design").unwrap(),
-            PathBuf::from("/tmp/repo/bundles/generic/skills/code-design")
+            fs::read_to_string(cached_repo.join("SKILL.md")).unwrap(),
+            "dirty local cache"
         );
+    }
+
+    fn commit_skill(repo: &Path, content: &str) -> String {
+        fs::write(repo.join("SKILL.md"), content).unwrap();
+        run_git(repo, &["add", "."]).unwrap();
+        run_git(repo, &["commit", "-qm", "fixture"]).unwrap();
+        let output = run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["rev-parse", "HEAD"]),
+        )
+        .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
+    fn empty_git_repo(root: &Path, format: &str) -> PathBuf {
+        let repo = root.join("origin");
+        fs::create_dir(&repo).unwrap();
+        run_git(
+            &repo,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--object-format={format}"),
+            ],
+        )
+        .unwrap();
+        run_git(&repo, &["config", "user.name", "Fixture"]).unwrap();
+        run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        repo
     }
 
     #[test]
-    fn test_assemble_bundle_uses_git_skill_path() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let source_repo = tmp.path().join("source");
-        write_skill_dir(
-            &source_repo
-                .join("bundles")
-                .join("generic")
-                .join("skills")
-                .join("code-design"),
-            "code-design",
-        );
-        init_git_repo(&source_repo);
-
-        let bundle = bundle_with(
-            SourceSpec::default(),
-            &[(
-                "code-design",
-                SourceSpec {
-                    repo: Some(source_repo.to_string_lossy().to_string()),
-                    path: Some("bundles/generic/skills/code-design".to_string()),
-                    ..SourceSpec::default()
+    fn named_git_refs_use_remote_objects_despite_unrelated_refs_and_stale_tracking() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let origin = empty_git_repo(temp.path(), "sha1");
+        let default = commit_skill(&origin, "default");
+        run_git(&origin, &["checkout", "-qb", "head"]).unwrap();
+        commit_skill(&origin, "selected");
+        run_git(&origin, &["tag", "-a", "chosen", "-m", "chosen"]).unwrap();
+        run_git(&origin, &["checkout", "-q", "main"]).unwrap();
+        fs::write(
+            origin.join(".git/packed-refs"),
+            [
+                format!("{default} refs/heads/unrelated-").as_bytes(),
+                b"\xff\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let cache = temp.path().join("cache");
+        let references = [
+            None,
+            Some("HEAD"),
+            Some("head"),
+            Some("refs/heads/head"),
+            Some("chosen"),
+            Some("refs/tags/chosen"),
+        ];
+        for reference in references {
+            let checkout = fetch_git_repo(origin.to_str().unwrap(), reference, &cache).unwrap();
+            assert_eq!(
+                fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+                if reference.is_none() || reference == Some("HEAD") {
+                    "default"
+                } else {
+                    "selected"
                 },
-            )],
-        );
-
-        let bundle_root =
-            assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path()).unwrap();
-
-        assert!(bundle_root
-            .join("skills")
-            .join("code-design")
-            .join("SKILL.md")
-            .exists());
+                "{reference:?}"
+            );
+            run_git(
+                &checkout,
+                &[
+                    "config",
+                    "--replace-all",
+                    "remote.origin.fetch",
+                    "+refs/heads/main:refs/remotes/origin/main",
+                ],
+            )
+            .unwrap();
+            run_git(&checkout, &["config", "--unset", "branch.main.remote"]).unwrap();
+            run_git(
+                &checkout,
+                &[
+                    "symbolic-ref",
+                    "refs/remotes/origin/head",
+                    "refs/remotes/origin/main",
+                ],
+            )
+            .unwrap();
+        }
+        run_git(&origin, &["checkout", "-q", "head"]).unwrap();
+        commit_skill(&origin, "updated selection");
+        run_git(&origin, &["tag", "-f", "-a", "chosen", "-m", "moved"]).unwrap();
+        run_git(&origin, &["checkout", "-q", "main"]).unwrap();
+        commit_skill(&origin, "updated default");
+        for reference in references {
+            let checkout = fetch_git_repo(origin.to_str().unwrap(), reference, &cache).unwrap();
+            assert_eq!(
+                fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+                if reference.is_none() || reference == Some("HEAD") {
+                    "updated default"
+                } else {
+                    "updated selection"
+                },
+                "{reference:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_assemble_bundle_rejects_invalid_skill_sources() {
-        let tmp = crate::test_support::tempdir().unwrap();
-        let bundle = bundle_with(
-            SourceSpec::default(),
-            &[(
-                "bad",
-                SourceSpec {
-                    url: Some("https://example.com/skill.md".to_string()),
-                    source: Some("/tmp/skill".to_string()),
-                    ..SourceSpec::default()
-                },
-            )],
-        );
-
-        let result = assemble_bundle("generic", &bundle, &tmp.path().join("cache"), tmp.path());
-        assert!(result.is_err());
-    }
-
-    fn serve_once(body: &'static str) -> Option<String> {
-        use tiny_http::{Response, Server};
-
-        let server = match Server::http("127.0.0.1:0") {
-            Ok(server) => server,
-            Err(err)
-                if err
-                    .downcast_ref::<std::io::Error>()
-                    .map(|err| err.kind() == std::io::ErrorKind::PermissionDenied)
-                    .unwrap_or(false) =>
-            {
-                return None
+    fn commit_selection_uses_storage_width_and_full_ids_precede_names() {
+        for format in ["sha1", "sha256"] {
+            let temp = crate::test_support::tempdir().unwrap();
+            let origin = empty_git_repo(temp.path(), format);
+            let pinned = commit_skill(&origin, "pinned");
+            commit_skill(&origin, "named");
+            for namespace in ["heads", "tags"] {
+                run_git(
+                    &origin,
+                    &["update-ref", &format!("refs/{namespace}/{pinned}"), "HEAD"],
+                )
+                .unwrap();
             }
-            Err(err) => panic!("failed to start local test HTTP server: {err}"),
-        };
-        let port = match server.server_addr() {
-            tiny_http::ListenAddr::IP(sa) => sa.port(),
-            #[cfg(unix)]
-            tiny_http::ListenAddr::Unix(_) => unreachable!(),
-        };
+            let cache = temp.path().join("cache");
+            let mut selectors = vec![pinned.as_str(), &pinned[..12]];
+            if format == "sha256" {
+                selectors.push(&pinned[..40]);
+            }
+            for reference in selectors {
+                for _ in 0..2 {
+                    let checkout =
+                        fetch_git_repo(origin.to_str().unwrap(), Some(reference), &cache).unwrap();
+                    assert_eq!(
+                        fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+                        "pinned",
+                        "{format}, {reference}"
+                    );
+                }
+            }
+            for namespace in ["heads", "tags"] {
+                let checkout = fetch_git_repo(
+                    origin.to_str().unwrap(),
+                    Some(&format!("refs/{namespace}/{pinned}")),
+                    &cache,
+                )
+                .unwrap();
+                assert_eq!(
+                    fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+                    "named"
+                );
+            }
+            fs::rename(&origin, temp.path().join("offline")).unwrap();
+            let checkout = fetch_git_repo(origin.to_str().unwrap(), Some(&pinned), &cache).unwrap();
+            assert_eq!(
+                fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+                "pinned"
+            );
+        }
+    }
 
+    #[test]
+    fn remote_head_switches_select_exact_commits() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let origin = empty_git_repo(temp.path(), "sha1");
+        let older = commit_skill(&origin, "older");
+        run_git(&origin, &["branch", "older", &older]).unwrap();
+        commit_skill(&origin, "newer");
+        let cache = temp.path().join("cache");
+        for (branch, expected) in [("main", "newer"), ("older", "older")] {
+            run_git(&origin, &["checkout", "-q", branch]).unwrap();
+            let checkout = fetch_git_repo(origin.to_str().unwrap(), None, &cache).unwrap();
+            assert_eq!(
+                fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+                expected
+            );
+        }
+        run_git(&origin, &["checkout", "-qb", "divergent"]).unwrap();
+        commit_skill(&origin, "divergent");
+        let checkout = fetch_git_repo(origin.to_str().unwrap(), None, &cache).unwrap();
+        assert_eq!(
+            fs::read_to_string(checkout.join("SKILL.md")).unwrap(),
+            "divergent"
+        );
+    }
+
+    fn serve_once(body: &'static str) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr();
         std::thread::spawn(move || {
-            if let Ok(request) = server.recv() {
-                let response = Response::from_string(body);
-                request.respond(response).ok();
-            }
+            let request = server
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .expect("skill download");
+            request
+                .respond(tiny_http::Response::from_string(body))
+                .unwrap();
         });
-
-        Some(format!("http://127.0.0.1:{port}/skill"))
+        format!("http://{address}/skill")
     }
 }
