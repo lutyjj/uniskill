@@ -7,6 +7,7 @@ mod harnesses;
 mod hook;
 mod linker;
 mod mcp;
+mod persistence;
 mod skill;
 mod state;
 mod sync;

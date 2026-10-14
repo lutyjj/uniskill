@@ -3,15 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Instant;
 
-use crate::config::{Bundle, Source};
+use crate::config::{Bundle, GitSource, Source};
 use crate::fetcher;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Remote {
-    Git {
-        repo: String,
-        git_ref: Option<String>,
-    },
+    Git(GitSource),
     Url(String),
 }
 
@@ -44,11 +41,8 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    pub fn git(&self, repo: &str, git_ref: Option<&str>) -> anyhow::Result<PathBuf> {
-        self.get(&Remote::Git {
-            repo: fetcher::normalize_repo_url(repo),
-            git_ref: git_ref.map(str::to_owned),
-        })
+    pub fn git(&self, source: &GitSource) -> anyhow::Result<PathBuf> {
+        self.get(&Remote::Git(source.clone()))
     }
 
     pub fn url(&self, url: &str) -> anyhow::Result<PathBuf> {
@@ -67,7 +61,6 @@ impl Prepared {
 pub fn prepare(
     bundles: &HashMap<String, Bundle>,
     cache: &Path,
-    base: &Path,
     workers: usize,
     progress: &mut impl FnMut(Progress),
 ) -> Prepared {
@@ -85,12 +78,9 @@ pub fn prepare(
         );
         for (label, spec) in specs {
             let remote = match spec.resolve() {
-                Ok(Some(Source::Git { repo, git_ref, .. })) => Remote::Git {
-                    repo: fetcher::normalize_repo_url(&crate::config::resolve_repo_from(
-                        &repo, base,
-                    )),
-                    git_ref,
-                },
+                Ok(Some(Source::Git { repo, git_ref, .. })) => {
+                    Remote::Git(GitSource::new(&repo, git_ref.as_deref()))
+                }
                 Ok(Some(Source::Url(url))) => Remote::Url(url),
                 _ => continue,
             };
@@ -116,7 +106,7 @@ pub fn prepare(
                     break;
                 };
                 let kind = match &source {
-                    Remote::Git { .. } => "git",
+                    Remote::Git(_) => "git",
                     Remote::Url(_) => "url",
                 };
                 let _ = sender.send((
@@ -128,9 +118,7 @@ pub fn prepare(
                 ));
                 let started = Instant::now();
                 let result = match &source {
-                    Remote::Git { repo, git_ref } => {
-                        fetcher::fetch_git_repo(repo, git_ref.as_deref(), cache)
-                    }
+                    Remote::Git(source) => fetcher::fetch_git_repo(source, cache),
                     Remote::Url(url) => fetcher::cache_url(url, cache),
                 }
                 .map_err(|error| format!("{error:#}"));
@@ -209,7 +197,7 @@ url = "http://{address}/two"
 "#
         ))
         .unwrap();
-        let prepared = prepare(&config.bundles, temp.path(), temp.path(), 2, &mut |_| {});
+        let prepared = prepare(&config.bundles, temp.path(), 2, &mut |_| {});
         handler.join().unwrap();
         assert_eq!(prepared.sources.len(), 2);
         assert!(prepared.sources.values().all(Result::is_ok));

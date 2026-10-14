@@ -40,6 +40,10 @@ A bundle that fails to build is reported and skipped. Links from a previous sync
 absent from the config are pruned. Only uniskill-owned symlinks are
 removed; hand-placed files are left alone.
 
+Skill routes are planned before cache publication or link changes. Routes to
+the same cache entry and destination coalesce. Different cache entries targeting
+one destination fail their bundles and preserve the installed cache and links.
+
 ## What it does not do
 
 uniskill reads text sources and writes links or configuration. It does not run
@@ -196,6 +200,10 @@ Each skill must declare exactly one source kind: `source`, `url`, or `repo`.
 Git-backed skills use the repository root when `path` is omitted. `ref` and
 `path` are valid only with `repo`.
 
+Bundle and skill keys are single non-hidden path components, limited to 255
+bytes. Skill target patterns require `{name}`. Paths and environment variables
+resolve once at the declaring config file.
+
 GitHub shorthands such as `owner/repo`, `gh:owner/repo`, and
 `github:owner/repo` resolve to SSH URLs. Plain SSH, HTTPS, and local git paths
 are passed through.
@@ -231,10 +239,12 @@ runs tests, builds the release binary, and writes distributable assets to
 make release
 ```
 
-Tag releases with `v<version>` matching `Cargo.toml`. Use a conventional commit
-subject for the release commit so the changelog generator has content. The
+Create an annotated `v<version>` tag matching `Cargo.toml` on the validated
+commit. Use a conventional commit subject so the changelog generator has content. The
 GitHub release workflow runs the same gate for each supported target and
 publishes raw binaries, tarballs, and `checksums-sha256.txt`.
+Both release jobs validate the tag type, version, and checked-out commit through
+`scripts/release-version.sh`. Retry releases by rerunning the tag workflow.
 
 ## Sync behavior
 

@@ -15,8 +15,20 @@ pub struct HarnessDef {
 }
 
 /// Built-in harness registry. Users can extend or override via config.
-pub fn default_harnesses() -> HashMap<String, HarnessDef> {
-    toml::from_str(include_str!("harnesses.toml")).expect("built-in harness definitions are valid")
+pub fn default_harnesses() -> anyhow::Result<HashMap<String, HarnessDef>> {
+    let mut registry: HashMap<String, HarnessDef> = toml::from_str(include_str!("harnesses.toml"))?;
+    let base = std::env::current_dir()?;
+    for harness in registry.values_mut() {
+        if let Some(pattern) = &mut harness.pattern {
+            *pattern = crate::config::resolve_source_from(pattern, &base)
+                .to_string_lossy()
+                .into_owned();
+        }
+        if let Some(target) = &mut harness.mcp {
+            target.path = crate::config::resolve_native_path(&target.path, &base)?;
+        }
+    }
+    Ok(registry)
 }
 
 #[cfg(test)]
@@ -25,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_default_registry_has_known_harnesses() {
-        let registry = default_harnesses();
+        let registry = default_harnesses().unwrap();
         assert!(registry.contains_key("pi"));
         assert!(registry.contains_key("claude-code"));
     }

@@ -192,20 +192,36 @@ See [README.md](../README.md#environment-variables) for variable expansion.
 1. Load the built-in destination registry and resolve the config/includes.
 2. Validate and reconcile MCP entries as a separate journaled transaction.
 3. Lock the skill cache and load the previous link manifest.
-4. Validate bundle sources and skill destinations before downloading.
+4. Validate bundle sources and skill destinations, and restore interrupted
+   cache publications before downloading.
 5. Deduplicate remote sources and fetch them with bounded concurrency. Jobs
    report durations; failed jobs retain each affected bundle's prior cache.
-6. Assemble bundles in sorted order. Local sources link live or copy according
+6. Stage bundles in sorted order. Local sources link live or copy according
    to `link`; explicit skills override whole-bundle entries by name.
-7. Compare the staged tree with the published cache. Identical trees retain
-   their files and metadata; changed trees replace the cache after successful
-   assembly.
-8. Reconcile harness symlinks, preserve failed bundles' ownership, and prune
-   recorded links that still point into the cache.
-9. Write the link manifest only when its bytes change.
+7. Plan every skill destination before publication. Equivalent routes to one
+   cache entry coalesce; competing cache entries fail their bundles and retain
+   the installed cache and links.
+8. Persist ownership intent for existing and planned links. Compare staged and
+   published trees, retaining identical caches and publishing accepted changes.
+9. Reconcile each harness link once, preserve failed bundles' ownership, and
+   prune recorded links that still point into the cache.
+10. Persist the resulting ownership manifest. Unlink failures retain their
+    records for retry. Every manifest write is atomic and skips identical bytes.
 
 Skill and MCP operations have separate ownership and failure boundaries. A
 skill fetch failure does not roll back a completed MCP transaction.
+
+Skill reconciliation permits incremental progress across bundles. Its durable
+ownership intent is a conservative superset until application finishes, so an
+interrupted apply can reconcile or prune partially installed links on retry.
+Unreadable or malformed ownership state stops skill sync before cache or link
+mutation. State persistence failures return a failed sync.
+
+MCP requires a journal because it edits shared native documents and must restore
+their before-images. Skills retain their own cache/link lifecycle and share only
+atomic file replacement and destination path resolution with MCP. A transaction
+spanning caches and links would also need durable link and directory before-images;
+revisit that boundary if all-or-nothing skill application becomes a requirement.
 
 For a linked local source the harness symlink resolves through the cache entry
 to the working tree, so the cache is an index of live links rather than copies.
@@ -248,7 +264,10 @@ cache/
                 └── SKILL.md
 ```
 
-Git repositories are cached separately under `cache/repos/`.
+Git repositories are cached separately under `cache/repos/`. One normalized
+repository/ref identity owns both download deduplication and checkout naming;
+an omitted ref is distinct from every explicit ref. Cache directories are
+derived data and may be rebuilt when their naming scheme changes.
 
 ## Symlink strategy
 

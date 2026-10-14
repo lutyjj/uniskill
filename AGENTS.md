@@ -40,6 +40,7 @@ Modules own narrow jobs:
 | `harnesses.rs` | Registry loading and configurable skill/MCP destinations |
 | `fetch_plan.rs` | Deduplicated, bounded remote downloads and progress |
 | `mcp/` | Server rendering, native documents, ownership, transactional writes |
+| `persistence.rs` | Atomic, durable file replacement shared by ownership stores |
 | `hook.rs` | Installing the `post-checkout` git hook and global dispatcher |
 | `linker.rs` | Harness symlink creation and status classification |
 | `skill.rs` | Shared skill-directory predicate |
@@ -57,7 +58,7 @@ Each shared fact has one owner:
 
 - Rust version: `rust-toolchain.toml`
 - Built-in harness definitions: `src/harnesses.toml`
-- Source shape: `config::SourceSpec` and `config::Source`
+- Source shape and Git identity: `config::SourceSpec`, `config::Source`, and `config::GitSource`
 - Skill directory rule: `skill::is_skill_dir`
 - Release gate: `make release`
 - GitHub release asset naming: `.github/workflows/release.yml`

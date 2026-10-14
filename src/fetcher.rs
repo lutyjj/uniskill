@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::config::{self, Bundle, Source, SourceSpec};
+use crate::config::{Bundle, GitSource, Source, SourceSpec};
 
 /// Assemble a bundle into `cache_dir/bundles/<name>/skills/`.
 ///
@@ -24,19 +24,40 @@ pub fn assemble_bundle(
     cache_dir: &Path,
     source_base_dir: &Path,
 ) -> Result<PathBuf> {
-    validate_bundle(bundle)?;
-    assemble_bundle_prepared(bundle_name, bundle, cache_dir, source_base_dir, None)
+    let mut bundle = bundle.clone();
+    crate::config::anchor_bundle_paths(&mut bundle, source_base_dir);
+    let bundles = std::collections::HashMap::from([(bundle_name.into(), bundle.clone())]);
+    let prepared = crate::fetch_plan::prepare(&bundles, cache_dir, 4, &mut |_| {});
+    stage_bundle(bundle_name, &bundle, cache_dir, &prepared)?.publish()
 }
 
-pub fn assemble_bundle_prepared(
+pub struct StagedBundle {
+    pub staged: PathBuf,
+    pub published: PathBuf,
+}
+
+impl StagedBundle {
+    pub fn publish(self) -> Result<PathBuf> {
+        replace_bundle_cache(&self.staged, &self.published)?;
+        Ok(self.published.clone())
+    }
+}
+
+impl Drop for StagedBundle {
+    fn drop(&mut self) {
+        let _ = remove_existing(&self.staged);
+    }
+}
+
+pub fn stage_bundle(
     bundle_name: &str,
     bundle: &Bundle,
     cache_dir: &Path,
-    source_base_dir: &Path,
-    prepared: Option<&crate::fetch_plan::Prepared>,
-) -> Result<PathBuf> {
+    prepared: &crate::fetch_plan::Prepared,
+) -> Result<StagedBundle> {
     validate_bundle(bundle)?;
     let bundle_root = cache_dir.join("bundles").join(bundle_name);
+    recover_bundle_cache(&bundle_root)?;
     let staging_root = cache_dir
         .join("bundles")
         .join(format!(".{bundle_name}.staging"));
@@ -52,8 +73,7 @@ pub fn assemble_bundle_prepared(
     {
         // Only a local working tree can be linked live; remote sources copy.
         let link = bundle.link && matches!(source, Source::Local(_));
-        let bundle_dir =
-            materialize_bundle_dir(bundle_name, &source, cache_dir, source_base_dir, prepared)?;
+        let bundle_dir = materialize_bundle_dir(bundle_name, &source, prepared)?;
         place_bundle_skills(bundle_name, &bundle_dir, &skills_dir, link)?;
     }
 
@@ -65,22 +85,19 @@ pub fn assemble_bundle_prepared(
         // An explicit skill overrides whatever the whole-bundle layer placed
         // under the same name — clear it first so link/copy start clean.
         remove_existing(&dest)?;
-        materialize_skill(
-            skill_name,
-            &source,
-            &dest,
-            cache_dir,
-            source_base_dir,
-            bundle.link,
-            prepared,
-        )?;
+        materialize_skill(skill_name, &source, &dest, bundle.link, prepared)?;
     }
 
-    replace_bundle_cache(&staging_root, &bundle_root)?;
-    Ok(bundle_root)
+    Ok(StagedBundle {
+        staged: staging_root,
+        published: bundle_root,
+    })
 }
 
 pub(crate) fn validate_bundle(bundle: &Bundle) -> Result<()> {
+    if bundle.source.is_empty() && bundle.skills.is_empty() {
+        anyhow::bail!("bundle requires a source or explicit skills");
+    }
     if matches!(bundle.source.resolve()?, Some(Source::Url(_))) {
         anyhow::bail!("a whole-bundle source cannot be a URL");
     }
@@ -93,6 +110,7 @@ pub(crate) fn validate_bundle(bundle: &Bundle) -> Result<()> {
         }
     }
     for (name, spec) in &bundle.skills {
+        crate::config::validate_component(name)?;
         resolve_skill_source(name, spec)?;
     }
     Ok(())
@@ -148,6 +166,7 @@ fn same_tree(left: &Path, right: &Path) -> Result<bool> {
 }
 
 fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
+    recover_bundle_cache(bundle_root)?;
     if same_tree(staging_root, bundle_root)? {
         return remove_existing(staging_root);
     }
@@ -184,6 +203,23 @@ fn replace_bundle_cache(staging_root: &Path, bundle_root: &Path) -> Result<()> {
     }
 }
 
+/// Restore the published path before source checks or worktree readers use it.
+/// The caller holds the cache lock; a remaining staging tree is disposable.
+pub(crate) fn recover_bundle_cache(bundle_root: &Path) -> Result<()> {
+    let backup = sibling_cache_path(bundle_root, "previous")?;
+    match fs::symlink_metadata(bundle_root) {
+        Ok(_) => remove_existing(&backup),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(&backup) {
+                Ok(_) => fs::rename(&backup, bundle_root).context("failed to restore bundle cache"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn sibling_cache_path(path: &Path, suffix: &str) -> Result<PathBuf> {
     let name = path
         .file_name()
@@ -204,24 +240,15 @@ fn resolve_skill_source(skill_name: &str, spec: &SourceSpec) -> Result<Source> {
 fn materialize_bundle_dir(
     bundle_name: &str,
     source: &Source,
-    cache_dir: &Path,
-    base_dir: &Path,
-    prepared: Option<&crate::fetch_plan::Prepared>,
+    prepared: &crate::fetch_plan::Prepared,
 ) -> Result<PathBuf> {
     match source {
-        Source::Local(path) => Ok(config::resolve_source_from(path, base_dir)),
+        Source::Local(path) => Ok(PathBuf::from(path)),
         Source::Git {
             repo,
             git_ref,
             path,
-        } => resolve_git_dir(
-            repo,
-            git_ref.as_deref(),
-            path.as_deref(),
-            cache_dir,
-            base_dir,
-            prepared,
-        ),
+        } => resolve_git_dir(repo, git_ref.as_deref(), path.as_deref(), prepared),
         Source::Url(_) => Err(anyhow::anyhow!(
             "bundle '{bundle_name}' cannot use a `url` source — a url is a single file, \
              not a bundle; declare it as a per-skill entry under \
@@ -281,14 +308,12 @@ fn materialize_skill(
     skill_name: &str,
     source: &Source,
     dest: &Path,
-    cache_dir: &Path,
-    base_dir: &Path,
     link: bool,
-    prepared: Option<&crate::fetch_plan::Prepared>,
+    prepared: &crate::fetch_plan::Prepared,
 ) -> Result<()> {
     match source {
         Source::Local(path) => {
-            let source = config::resolve_source_from(path, base_dir);
+            let source = PathBuf::from(path);
             if link {
                 link_skill_dir(skill_name, &source, dest)
             } else {
@@ -300,25 +325,15 @@ fn materialize_skill(
             git_ref,
             path,
         } => {
-            let source = resolve_git_dir(
-                repo,
-                git_ref.as_deref(),
-                path.as_deref(),
-                cache_dir,
-                base_dir,
-                prepared,
-            )?;
+            let source = resolve_git_dir(repo, git_ref.as_deref(), path.as_deref(), prepared)?;
             copy_skill_dir(skill_name, &source, dest)
         }
         Source::Url(url) => {
             fs::create_dir_all(dest)
                 .with_context(|| format!("failed to create skill cache dir for '{skill_name}'"))?;
-            match prepared {
-                Some(prepared) => fs::copy(prepared.url(url)?, dest.join("SKILL.md"))
-                    .map(|_| ())
-                    .context("failed to copy downloaded skill"),
-                None => download_skill(url, &dest.join("SKILL.md")),
-            }
+            fs::copy(prepared.url(url)?, dest.join("SKILL.md"))
+                .map(|_| ())
+                .context("failed to copy downloaded skill")
         }
     }
 }
@@ -329,15 +344,9 @@ fn resolve_git_dir(
     repo: &str,
     git_ref: Option<&str>,
     path: Option<&str>,
-    cache_dir: &Path,
-    base_dir: &Path,
-    prepared: Option<&crate::fetch_plan::Prepared>,
+    prepared: &crate::fetch_plan::Prepared,
 ) -> Result<PathBuf> {
-    let repo = config::resolve_repo_from(repo, base_dir);
-    let repo_root = match prepared {
-        Some(prepared) => prepared.git(&repo, git_ref)?,
-        None => fetch_git_repo(&repo, git_ref, cache_dir)?,
-    };
+    let repo_root = prepared.git(&GitSource::new(repo, git_ref))?;
     match path {
         Some(path) => resolve_repo_path(&repo_root, path),
         None => Ok(repo_root),
@@ -345,17 +354,12 @@ fn resolve_git_dir(
 }
 
 /// Fetch a git repository into the local cache.
-pub(crate) fn fetch_git_repo(
-    repo: &str,
-    git_ref: Option<&str>,
-    base_dir: &Path,
-) -> Result<PathBuf> {
-    let repo_url = normalize_repo_url(repo);
-    let ref_key = git_ref.unwrap_or("head");
-    let repo_dir =
-        base_dir
-            .join("repos")
-            .join(format!("{}-{}", cache_key(&repo_url), cache_key(ref_key)));
+pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let repo_url = &source.repo;
+    let git_ref = source.git_ref.as_deref();
+    let key = format!("{:x}", Sha256::digest(serde_json::to_vec(source)?));
+    let repo_dir = base_dir.join("repos").join(key);
 
     if repo_dir.exists() {
         if let Some(commit) = git_ref
@@ -404,7 +408,7 @@ pub(crate) fn fetch_git_repo(
                 .arg("clone")
                 .arg("--quiet")
                 .arg("--")
-                .arg(&repo_url)
+                .arg(repo_url)
                 .arg(&repo_dir),
         )
         .with_context(|| format!("failed to clone git skill repository {repo_url}"))?;
@@ -506,66 +510,6 @@ fn copy_dir_all(source: &Path, dest: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-pub(crate) fn normalize_repo_url(repo: &str) -> String {
-    if let Some(path) = repo.strip_prefix("gh:") {
-        github_ssh_url(path)
-    } else if let Some(path) = repo.strip_prefix("github:") {
-        github_ssh_url(path)
-    } else if is_github_shorthand(repo) {
-        github_ssh_url(repo)
-    } else {
-        repo.to_string()
-    }
-}
-
-fn github_ssh_url(path: &str) -> String {
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    format!("git@github.com:{path}.git")
-}
-
-fn is_github_shorthand(repo: &str) -> bool {
-    let mut parts = repo.split('/');
-    matches!(
-        (parts.next(), parts.next(), parts.next()),
-        (Some(owner), Some(name), None)
-            if !owner.is_empty()
-                && !name.is_empty()
-                && !repo.contains(':')
-                && !repo.starts_with('.')
-                && !repo.starts_with('/')
-    )
-}
-
-fn cache_key(value: &str) -> String {
-    let slug = value
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-    let hash = fnv1a64(value.as_bytes());
-    if slug.is_empty() {
-        format!("{hash:016x}")
-    } else {
-        format!("{slug}-{hash:016x}")
-    }
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 fn run_git(repo_dir: &Path, args: &[&str]) -> Result<()> {
@@ -683,6 +627,14 @@ pub(crate) fn cache_url(url: &str, cache: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn normalized_repo(repo: &str) -> String {
+        GitSource::new(repo, None).repo
+    }
+
+    fn fetch_git_repo(repo: &str, git_ref: Option<&str>, cache: &Path) -> Result<PathBuf> {
+        super::fetch_git_repo(&GitSource::new(repo, git_ref), cache)
+    }
 
     /// Build a bundle from an optional whole-bundle source plus explicit skills.
     /// `link` is true (the default) unless a test overrides `.link`.
@@ -1050,26 +1002,21 @@ mod tests {
     #[test]
     fn test_normalize_repo_url_supports_github_shorthand() {
         assert_eq!(
-            normalize_repo_url("lutyjj/agent-skills"),
+            normalized_repo("lutyjj/agent-skills"),
             "git@github.com:lutyjj/agent-skills.git"
         );
         assert_eq!(
-            normalize_repo_url("gh:lutyjj/agent-skills"),
+            normalized_repo("gh:lutyjj/agent-skills"),
             "git@github.com:lutyjj/agent-skills.git"
         );
         assert_eq!(
-            normalize_repo_url("github:lutyjj/agent-skills.git"),
+            normalized_repo("github:lutyjj/agent-skills.git"),
             "git@github.com:lutyjj/agent-skills.git"
         );
         assert_eq!(
-            normalize_repo_url("https://github.com/lutyjj/agent-skills.git"),
+            normalized_repo("https://github.com/lutyjj/agent-skills.git"),
             "https://github.com/lutyjj/agent-skills.git"
         );
-    }
-
-    #[test]
-    fn test_cache_key_keeps_sanitized_collisions_distinct() {
-        assert_ne!(cache_key("owner/repo"), cache_key("owner:repo"));
     }
 
     #[test]

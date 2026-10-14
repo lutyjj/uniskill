@@ -1,52 +1,38 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use crate::config;
-use crate::fetcher;
-use crate::harnesses;
-use crate::linker;
-use crate::state;
-use crate::worktree;
+use anyhow::{bail, Context, Result};
+
+use crate::{config, fetch_plan, fetcher, harnesses, linker, state, worktree};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SyncSummary {
     pub ok: usize,
     pub created: usize,
     pub updated: usize,
-    pub broken: usize,
     pub conflicts: usize,
+    pub broken: usize,
     pub pruned: usize,
+    pub errors: usize,
 }
 
 impl SyncSummary {
     pub fn total_synced(&self) -> usize {
         self.ok + self.created + self.updated
     }
-
     pub fn skipped(&self) -> usize {
         self.conflicts + self.broken
     }
-
     pub fn has_failures(&self) -> bool {
-        self.conflicts > 0 || self.broken > 0
+        self.conflicts > 0 || self.broken > 0 || self.errors > 0
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncEvent {
-    BundleSkippedNoSources {
-        bundle: String,
-    },
     BundleFailed {
         bundle: String,
         error: String,
-    },
-    UnknownHarness {
-        bundle: String,
-        harness: String,
-    },
-    BundleNotAssembled {
-        bundle: String,
     },
     SkillSynced {
         skill_name: String,
@@ -58,7 +44,11 @@ pub enum SyncEvent {
         skill: String,
         harness: String,
     },
-    StateWriteFailed {
+    PruneFailed {
+        path: String,
+        error: String,
+    },
+    StateFailed {
         error: String,
     },
 }
@@ -69,28 +59,188 @@ pub struct SyncReport {
     pub summary: SyncSummary,
 }
 
-fn lock_failure(error: anyhow::Error) -> SyncReport {
+fn state_failure(error: anyhow::Error) -> SyncReport {
     SyncReport {
-        events: vec![SyncEvent::StateWriteFailed {
-            error: error.to_string(),
+        events: vec![SyncEvent::StateFailed {
+            error: format!("{error:#}"),
         }],
         summary: SyncSummary {
-            conflicts: 1,
+            errors: 1,
             ..SyncSummary::default()
         },
     }
 }
 
-/// Iterate bundles and wire them into the registry.
-///
-/// Bundles are processed in sorted order so runs are reproducible, and one
-/// bundle's failure is reported and skipped rather than aborting the whole sync.
-/// Links installed on the previous sync but no longer declared are pruned.
-///
-/// `cache_dir` is where bundles are assembled and the ownership root for
-/// pruning; `state_dir` is where this sync's manifest lives. They are the same
-/// directory for a normal sync, and differ for a worktree sync so that main and
-/// worktree runs never prune each other's links.
+fn begin(cache: &Path, state_dir: &Path) -> Result<(std::fs::File, PathBuf, state::Manifest)> {
+    let lock = state::lock(cache)?;
+    let cache = cache.canonicalize()?;
+    let previous = state::Manifest::load(state_dir)?;
+    Ok((lock, cache, previous))
+}
+
+fn bundle_failure(
+    report: &mut SyncReport,
+    failed: &mut BTreeSet<String>,
+    bundle: &str,
+    error: anyhow::Error,
+) {
+    failed.insert(bundle.into());
+    report.summary.conflicts += 1;
+    report.events.push(SyncEvent::BundleFailed {
+        bundle: bundle.into(),
+        error: format!("{error:#}"),
+    });
+}
+
+struct Destination {
+    harness: String,
+    label: String,
+    pattern: String,
+}
+
+/// Both sync modes validate the complete routing policy before selecting scope.
+fn destinations(
+    bundle: &config::Bundle,
+    registry: &HashMap<String, harnesses::HarnessDef>,
+    ctx: Option<&worktree::WorktreeContext>,
+) -> Result<Vec<Destination>> {
+    if bundle.harnesses.is_empty() {
+        bail!("bundle requires at least one harness");
+    }
+    fetcher::validate_bundle(bundle)?;
+    let mut result = Vec::new();
+    for name in bundle.harnesses.iter().collect::<BTreeSet<_>>() {
+        let harness = registry
+            .get(name)
+            .with_context(|| format!("unknown harness '{name}'"))?;
+        let pattern = harness
+            .pattern
+            .as_ref()
+            .with_context(|| format!("harness '{name}' has no skill target"))?;
+        config::validate_pattern(pattern)?;
+        let pattern = match ctx {
+            Some(ctx) => match ctx.retarget(pattern) {
+                Some(pattern) => pattern,
+                None => continue,
+            },
+            None => pattern.clone(),
+        };
+        result.push(Destination {
+            harness: name.clone(),
+            label: harness.label.clone(),
+            pattern,
+        });
+    }
+    Ok(result)
+}
+
+struct Route {
+    source: PathBuf,
+    owner: state::ManagedLink,
+    label: String,
+}
+
+type Routes = BTreeMap<PathBuf, Vec<Route>>;
+
+fn plan_bundle(
+    routes: &mut Routes,
+    name: &str,
+    skills: &Path,
+    published: &Path,
+    destinations: &[Destination],
+) -> Result<()> {
+    let mut planned = Vec::new();
+    for entry in
+        std::fs::read_dir(skills).context("bundle cache is unavailable; run normal sync first")?
+    {
+        let entry = entry?;
+        if !crate::skill::is_skill_dir(&entry.path()) {
+            continue;
+        }
+        let skill = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("skill names must be UTF-8"))?;
+        config::validate_component(&skill)?;
+        for destination in destinations {
+            let path = config::destination_path(Path::new(
+                &destination.pattern.replace("{name}", &skill),
+            ))?;
+            let owner = state::ManagedLink {
+                path: path.to_string_lossy().into_owned(),
+                skill: skill.clone(),
+                harness: destination.harness.clone(),
+                bundle: name.into(),
+            };
+            planned.push((
+                path,
+                Route {
+                    source: published.join("skills").join(&skill),
+                    owner,
+                    label: destination.label.clone(),
+                },
+            ));
+        }
+    }
+    for (path, route) in planned {
+        routes.entry(path).or_default().push(route);
+    }
+    Ok(())
+}
+
+fn select_routes(
+    routes: Routes,
+    failed: &mut BTreeSet<String>,
+    report: &mut SyncReport,
+) -> BTreeMap<PathBuf, Route> {
+    for (path, candidates) in &routes {
+        if candidates
+            .iter()
+            .any(|route| route.source != candidates[0].source)
+        {
+            for route in candidates {
+                bundle_failure(
+                    report,
+                    failed,
+                    &route.owner.bundle,
+                    anyhow::anyhow!("conflicting skill routes at {}", path.display()),
+                );
+            }
+        }
+    }
+    routes
+        .into_iter()
+        .filter_map(|(path, candidates)| {
+            candidates
+                .into_iter()
+                .find(|route| !failed.contains(&route.owner.bundle))
+                .map(|route| (path, route))
+        })
+        .collect()
+}
+
+/// Retain a durable ownership superset until link application and pruning finish.
+/// Every intermediate state can be reconciled by the next ordinary sync.
+fn save_intent(
+    previous: &state::Manifest,
+    routes: &BTreeMap<PathBuf, Route>,
+    state_dir: &Path,
+) -> Result<()> {
+    let mut owned = BTreeMap::new();
+    for link in previous
+        .links
+        .iter()
+        .cloned()
+        .chain(routes.values().map(|r| r.owner.clone()))
+    {
+        owned.insert(link.path.clone(), link);
+    }
+    state::Manifest {
+        links: owned.into_values().collect(),
+    }
+    .save(state_dir)
+}
+
 #[cfg(test)]
 pub fn sync_with_registry(
     bundles: &HashMap<String, config::Bundle>,
@@ -99,157 +249,90 @@ pub fn sync_with_registry(
     state_dir: &Path,
     source_base_dir: &Path,
 ) -> SyncReport {
-    sync_with_progress(
-        bundles,
-        registry,
-        cache_dir,
-        state_dir,
-        source_base_dir,
-        4,
-        &mut |_| {},
-    )
+    let mut bundles = bundles.clone();
+    for bundle in bundles.values_mut() {
+        config::anchor_bundle_paths(bundle, source_base_dir);
+    }
+    sync_with_progress(&bundles, registry, cache_dir, state_dir, 4, &mut |_| {})
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn sync_with_progress(
     bundles: &HashMap<String, config::Bundle>,
     registry: &HashMap<String, harnesses::HarnessDef>,
     cache_dir: &Path,
     state_dir: &Path,
-    source_base_dir: &Path,
     jobs: usize,
-    progress: &mut impl FnMut(crate::fetch_plan::Progress),
+    progress: &mut impl FnMut(fetch_plan::Progress),
 ) -> SyncReport {
-    let _lock = match state::lock(cache_dir) {
-        Ok(lock) => lock,
-        Err(error) => return lock_failure(error),
+    let (_lock, cache, previous) = match begin(cache_dir, state_dir) {
+        Ok(inputs) => inputs,
+        Err(error) => return state_failure(error),
     };
-    let previous = state::Manifest::load(state_dir);
     let mut report = SyncReport::default();
-
-    let mut managed: Vec<state::ManagedLink> = Vec::new();
-    let mut errored_bundles: BTreeSet<String> = BTreeSet::new();
-
-    let mut bundle_names: Vec<&String> = bundles.keys().collect();
-    bundle_names.sort();
-
-    let eligible: HashMap<String, config::Bundle> = bundles
-        .iter()
-        .filter(|(_, bundle)| {
-            !bundle.harnesses.is_empty()
-                && bundle
-                    .harnesses
-                    .iter()
-                    .all(|name| registry.get(name).is_some_and(|h| h.pattern.is_some()))
-                && fetcher::validate_bundle(bundle).is_ok()
-        })
-        .map(|(name, bundle)| (name.clone(), bundle.clone()))
-        .collect();
-    let prepared =
-        crate::fetch_plan::prepare(&eligible, cache_dir, source_base_dir, jobs, progress);
-
-    for bundle_name in bundle_names {
-        let bundle = &bundles[bundle_name];
-        if bundle.source.is_empty() && bundle.skills.is_empty() {
-            report.events.push(SyncEvent::BundleSkippedNoSources {
-                bundle: bundle_name.clone(),
-            });
-            errored_bundles.insert(bundle_name.clone());
-            report.summary.conflicts += 1;
-            continue;
-        }
-
-        let mut resolved_harnesses = Vec::new();
-        let mut missing_harness = false;
-        for harness_name in &bundle.harnesses {
-            match registry.get(harness_name) {
-                Some(harness) if harness.pattern.is_some() => {
-                    resolved_harnesses.push((harness_name, harness))
-                }
-                Some(_) | None => {
-                    report.events.push(SyncEvent::UnknownHarness {
-                        bundle: bundle_name.clone(),
-                        harness: harness_name.clone(),
-                    });
-                    missing_harness = true;
-                    report.summary.conflicts += 1;
-                }
+    let mut failed = BTreeSet::new();
+    let mut eligible = HashMap::new();
+    let mut targets = BTreeMap::new();
+    for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
+        let checked = config::validate_component(name)
+            .and_then(|_| fetcher::recover_bundle_cache(&cache.join("bundles").join(name)))
+            .and_then(|_| destinations(bundle, registry, None));
+        match checked {
+            Ok(destinations) => {
+                targets.insert(name.clone(), destinations);
+                eligible.insert(name.clone(), bundle.clone());
             }
-        }
-        if missing_harness {
-            errored_bundles.insert(bundle_name.clone());
-            continue;
-        }
-
-        progress(crate::fetch_plan::Progress::Assembling {
-            bundle: bundle_name.clone(),
-        });
-        let source = match fetcher::assemble_bundle_prepared(
-            bundle_name,
-            bundle,
-            cache_dir,
-            source_base_dir,
-            Some(&prepared),
-        ) {
-            Ok(source) => source,
-            Err(err) => {
-                report.events.push(SyncEvent::BundleFailed {
-                    bundle: bundle_name.clone(),
-                    error: err.to_string(),
-                });
-                errored_bundles.insert(bundle_name.clone());
-                report.summary.conflicts += 1;
-                continue;
-            }
-        };
-
-        progress(crate::fetch_plan::Progress::Linking {
-            bundle: bundle_name.clone(),
-        });
-        for (harness_name, harness) in resolved_harnesses {
-            let mut results = linker::sync_bundle(
-                &source,
-                harness
-                    .pattern
-                    .as_deref()
-                    .expect("skill target was validated"),
-            );
-            results.sort_by(|a, b| a.skill_name.cmp(&b.skill_name));
-
-            for result in results {
-                record_result(
-                    &mut report,
-                    &mut managed,
-                    result,
-                    &harness.label,
-                    harness_name,
-                    bundle_name,
-                );
-            }
+            Err(error) => bundle_failure(&mut report, &mut failed, name, error),
         }
     }
-
-    finalize(
-        report,
-        &previous,
-        managed,
-        &errored_bundles,
-        cache_dir,
-        state_dir,
-    )
+    let prepared = fetch_plan::prepare(&eligible, &cache, jobs, progress);
+    let mut staged = BTreeMap::new();
+    let mut routes = Routes::new();
+    for (name, destinations) in targets {
+        progress(fetch_plan::Progress::Assembling {
+            bundle: name.clone(),
+        });
+        let result =
+            fetcher::stage_bundle(&name, &bundles[&name], &cache, &prepared).and_then(|bundle| {
+                plan_bundle(
+                    &mut routes,
+                    &name,
+                    &bundle.staged.join("skills"),
+                    &bundle.published,
+                    &destinations,
+                )?;
+                Ok(bundle)
+            });
+        match result {
+            Ok(bundle) => {
+                staged.insert(name, bundle);
+            }
+            Err(error) => bundle_failure(&mut report, &mut failed, &name, error),
+        }
+    }
+    let mut routes = select_routes(routes, &mut failed, &mut report);
+    if let Err(error) = save_intent(&previous, &routes, state_dir) {
+        return state_failure(error);
+    }
+    for (name, bundle) in staged {
+        if failed.contains(&name) {
+            continue;
+        }
+        if let Err(error) = bundle.publish() {
+            bundle_failure(&mut report, &mut failed, &name, error);
+        }
+    }
+    routes.retain(|_, route| !failed.contains(&route.owner.bundle));
+    for name in bundles.keys().collect::<BTreeSet<_>>() {
+        if !failed.contains(name) {
+            progress(fetch_plan::Progress::Linking {
+                bundle: name.clone(),
+            });
+        }
+    }
+    apply_routes(report, &previous, routes, failed, &cache, state_dir)
 }
 
-/// Sync the already-assembled cache into a linked git worktree.
-///
-/// Worktrees are fresh checkouts of tracked files only, so uniskill's generated
-/// skill symlinks never appear in them. This links the bundles a previous main
-/// `sync` already assembled into `cache_dir` onto the worktree's retargeted
-/// paths. It never fetches — that keeps a `post-checkout` hook fast and
-/// offline-safe — and it records its links in a worktree-scoped `state_dir` so
-/// a later main sync never prunes them and vice versa.
-///
-/// Harnesses whose target is outside the repository's main worktree (a
-/// machine-global path, or another repo) are left untouched.
+/// Worktrees consume published caches without downloading or assembling sources.
 pub fn sync_worktree(
     bundles: &HashMap<String, config::Bundle>,
     registry: &HashMap<String, harnesses::HarnessDef>,
@@ -257,172 +340,179 @@ pub fn sync_worktree(
     state_dir: &Path,
     ctx: &worktree::WorktreeContext,
 ) -> SyncReport {
-    let _lock = match state::lock(cache_dir) {
-        Ok(lock) => lock,
-        Err(error) => return lock_failure(error),
+    let (_lock, cache, previous) = match begin(cache_dir, state_dir) {
+        Ok(inputs) => inputs,
+        Err(error) => return state_failure(error),
     };
-    let previous = state::Manifest::load(state_dir);
     let mut report = SyncReport::default();
-    let mut managed: Vec<state::ManagedLink> = Vec::new();
-    // A worktree sync assembles nothing, so no bundle can fail to build; an
-    // empty errored set means orphan pruning is never held back.
-    let errored_bundles: BTreeSet<String> = BTreeSet::new();
-
-    let mut bundle_names: Vec<&String> = bundles.keys().collect();
-    bundle_names.sort();
-
-    for bundle_name in bundle_names {
-        let bundle = &bundles[bundle_name];
-        let assembled = cache_dir.join("bundles").join(bundle_name);
-        if !assembled.join("skills").is_dir() {
-            // The main sync that assembles this bundle has not run yet.
-            report.events.push(SyncEvent::BundleNotAssembled {
-                bundle: bundle_name.clone(),
+    let mut failed = BTreeSet::new();
+    let mut routes = Routes::new();
+    for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
+        let published = cache.join("bundles").join(name);
+        let result = config::validate_component(name)
+            .and_then(|_| destinations(bundle, registry, Some(ctx)))
+            .and_then(|destinations| {
+                if destinations.is_empty() {
+                    return Ok(());
+                }
+                fetcher::recover_bundle_cache(&published)?;
+                plan_bundle(
+                    &mut routes,
+                    name,
+                    &published.join("skills"),
+                    &published,
+                    &destinations,
+                )
             });
+        if let Err(error) = result {
+            bundle_failure(&mut report, &mut failed, name, error);
+        }
+    }
+    let routes = select_routes(routes, &mut failed, &mut report);
+    if let Err(error) = save_intent(&previous, &routes, state_dir) {
+        return state_failure(error);
+    }
+    apply_routes(report, &previous, routes, failed, &cache, state_dir)
+}
+
+fn apply_routes(
+    mut report: SyncReport,
+    previous: &state::Manifest,
+    routes: BTreeMap<PathBuf, Route>,
+    mut failed: BTreeSet<String>,
+    cache: &Path,
+    state_dir: &Path,
+) -> SyncReport {
+    let mut managed = Vec::new();
+    for (path, route) in routes {
+        let result = linker::ensure_skill_symlink(&route.source, &path);
+        match &result.status {
+            linker::SyncStatus::Ok => report.summary.ok += 1,
+            linker::SyncStatus::Created => report.summary.created += 1,
+            linker::SyncStatus::Updated => report.summary.updated += 1,
+            linker::SyncStatus::Broken => {
+                report.summary.broken += 1;
+                failed.insert(route.owner.bundle.clone());
+            }
+            linker::SyncStatus::Conflict(_) => {
+                report.summary.conflicts += 1;
+                failed.insert(route.owner.bundle.clone());
+            }
+        }
+        if matches!(
+            result.status,
+            linker::SyncStatus::Ok | linker::SyncStatus::Created | linker::SyncStatus::Updated
+        ) {
+            managed.push(route.owner);
+        }
+        report.events.push(SyncEvent::SkillSynced {
+            skill_name: result.skill_name,
+            harness_label: route.label,
+            target: result.target,
+            status: result.status,
+        });
+    }
+    let current: HashSet<_> = managed.iter().map(|link| link.path.clone()).collect();
+    for old in &previous.links {
+        if current.contains(&old.path) {
             continue;
         }
-
-        for harness_name in &bundle.harnesses {
-            let Some(harness) = registry.get(harness_name) else {
-                continue;
-            };
-            let Some(pattern) = &harness.pattern else {
-                continue;
-            };
-            let expanded = config::expand_env_vars(pattern);
-            let Some(retargeted) = ctx.retarget(&expanded) else {
-                // Global or other-repo harness — not owned by this worktree.
-                continue;
-            };
-
-            let mut results = linker::sync_bundle(&assembled, &retargeted);
-            results.sort_by(|a, b| a.skill_name.cmp(&b.skill_name));
-            for result in results {
-                record_result(
-                    &mut report,
-                    &mut managed,
-                    result,
-                    &harness.label,
-                    harness_name,
-                    bundle_name,
-                );
+        if failed.contains(&old.bundle) {
+            managed.push(old.clone());
+            continue;
+        }
+        match state::remove_if_managed(Path::new(&old.path), cache) {
+            Ok(true) => {
+                report.summary.pruned += 1;
+                report.events.push(SyncEvent::Pruned {
+                    skill: old.skill.clone(),
+                    harness: old.harness.clone(),
+                });
+            }
+            Ok(false) => {}
+            Err(error) => {
+                managed.push(old.clone());
+                report.summary.errors += 1;
+                report.events.push(SyncEvent::PruneFailed {
+                    path: old.path.clone(),
+                    error: error.to_string(),
+                });
             }
         }
     }
-
-    finalize(
-        report,
-        &previous,
-        managed,
-        &errored_bundles,
-        cache_dir,
-        state_dir,
-    )
-}
-
-/// Prune links no longer declared, then persist the manifest. The single commit
-/// point every sync path ends on.
-fn finalize(
-    mut report: SyncReport,
-    previous: &state::Manifest,
-    mut managed: Vec<state::ManagedLink>,
-    errored_bundles: &BTreeSet<String>,
-    cache_dir: &Path,
-    state_dir: &Path,
-) -> SyncReport {
-    report.summary.pruned = prune_orphans(
-        previous,
-        &mut managed,
-        errored_bundles,
-        cache_dir,
-        &mut report.events,
-    );
-
-    if let Err(err) = (state::Manifest { links: managed }).save(state_dir) {
-        report.events.push(SyncEvent::StateWriteFailed {
-            error: err.to_string(),
+    let managed: BTreeMap<_, _> = managed
+        .into_iter()
+        .map(|link| (link.path.clone(), link))
+        .collect();
+    if let Err(error) = (state::Manifest {
+        links: managed.into_values().collect(),
+    })
+    .save(state_dir)
+    {
+        report.summary.errors += 1;
+        report.events.push(SyncEvent::StateFailed {
+            error: format!("{error:#}"),
         });
     }
-
     report
-}
-
-/// Record one linker result into the report and, when the link is live, the
-/// managed set. Shared by the main and worktree sync paths so both classify and
-/// count outcomes identically.
-fn record_result(
-    report: &mut SyncReport,
-    managed: &mut Vec<state::ManagedLink>,
-    result: linker::SyncResult,
-    harness_label: &str,
-    harness_key: &str,
-    bundle_name: &str,
-) {
-    let status = result.status.clone();
-    if matches!(
-        status,
-        linker::SyncStatus::Ok | linker::SyncStatus::Created | linker::SyncStatus::Updated
-    ) {
-        managed.push(state::ManagedLink {
-            path: result.target.clone(),
-            skill: result.skill_name.clone(),
-            harness: harness_key.to_string(),
-            bundle: bundle_name.to_string(),
-        });
-    }
-
-    match &status {
-        linker::SyncStatus::Ok => report.summary.ok += 1,
-        linker::SyncStatus::Created => report.summary.created += 1,
-        linker::SyncStatus::Updated => report.summary.updated += 1,
-        linker::SyncStatus::Broken => report.summary.broken += 1,
-        linker::SyncStatus::Conflict(_) => report.summary.conflicts += 1,
-    }
-
-    report.events.push(SyncEvent::SkillSynced {
-        skill_name: result.skill_name,
-        harness_label: harness_label.to_string(),
-        target: result.target,
-        status,
-    });
-}
-
-fn prune_orphans(
-    previous: &state::Manifest,
-    managed: &mut Vec<state::ManagedLink>,
-    errored_bundles: &BTreeSet<String>,
-    cache_dir: &Path,
-    events: &mut Vec<SyncEvent>,
-) -> usize {
-    let current: HashSet<&str> = managed.iter().map(|link| link.path.as_str()).collect();
-    let mut retained: Vec<state::ManagedLink> = Vec::new();
-    let mut pruned = 0;
-
-    for old in &previous.links {
-        if current.contains(old.path.as_str()) {
-            continue;
-        }
-        if errored_bundles.contains(&old.bundle) {
-            retained.push(old.clone());
-            continue;
-        }
-        if state::remove_if_managed(Path::new(&old.path), cache_dir) {
-            events.push(SyncEvent::Pruned {
-                skill: old.skill.clone(),
-                harness: old.harness.clone(),
-            });
-            pruned += 1;
-        }
-    }
-
-    managed.extend(retained);
-    pruned
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn interrupted_apply_keeps_intended_ownership_for_the_next_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        write_skill_dir(&source.join("skills/demo"), "demo");
+        let cache = temp.path().join("cache");
+        let target = temp.path().join("target/demo");
+        let bundles = HashMap::from([(
+            "fixture".into(),
+            bundle_with_source(&source, vec!["fixture"]),
+        )]);
+        let registry = HashMap::from([(
+            "fixture".into(),
+            harnesses::HarnessDef {
+                label: "Fixture".into(),
+                pattern: Some(
+                    temp.path()
+                        .join("target/{name}")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                mcp: None,
+            },
+        )]);
+        let interrupted = std::panic::catch_unwind(|| {
+            sync_with_progress(&bundles, &registry, &cache, &cache, 1, &mut |event| {
+                if matches!(event, fetch_plan::Progress::Linking { .. }) {
+                    let owned = state::Manifest::load(&cache).unwrap();
+                    assert_eq!(owned.links.len(), 1);
+                    assert_eq!(owned.links[0].path, target.to_string_lossy());
+                    assert!(!target.exists());
+                    assert_eq!(
+                        linker::ensure_skill_symlink(
+                            &cache.join("bundles/fixture/skills/demo"),
+                            &target
+                        )
+                        .status,
+                        linker::SyncStatus::Created
+                    );
+                    panic!("fixture interruption after one link");
+                }
+            })
+        });
+        assert!(interrupted.is_err());
+        assert!(target.is_symlink());
+        let retry = sync_with_registry(&HashMap::new(), &registry, &cache, &cache, temp.path());
+        assert!(!retry.summary.has_failures());
+        assert_eq!(retry.summary.pruned, 1);
+        assert!(!target.is_symlink());
+        assert!(state::Manifest::load(&cache).unwrap().links.is_empty());
+    }
 
     #[test]
     fn worktree_waits_for_cache_publication_before_reading_or_pruning() {
@@ -543,7 +633,7 @@ mod tests {
         let report = sync_with_registry(&bundles, &registry, &cache, &cache, tmp.path());
 
         assert!(!report.summary.has_failures());
-        let manifest = state::Manifest::load(&cache);
+        let manifest = state::Manifest::load(&cache).unwrap();
         assert_eq!(manifest.links.len(), 1);
         assert_eq!(manifest.links[0].harness, "agents");
     }
@@ -589,14 +679,14 @@ mod tests {
         assert!(target.is_symlink());
         assert!(target.exists());
         assert!(old_skill.join("SKILL.md").exists());
-        let manifest = state::Manifest::load(&cache);
+        let manifest = state::Manifest::load(&cache).unwrap();
         assert_eq!(manifest.links.len(), 1);
         assert_eq!(manifest.links[0].path, target.to_string_lossy());
         assert!(report.events.iter().any(|event| {
             matches!(
                 event,
-                SyncEvent::UnknownHarness { bundle, harness }
-                    if bundle == "generic" && harness == "missing"
+                SyncEvent::BundleFailed { bundle, error }
+                    if bundle == "generic" && error.contains("missing")
             )
         }));
     }

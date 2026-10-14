@@ -25,91 +25,54 @@ pub enum SyncStatus {
 }
 
 /// Ensure a single skill is symlinked from `source` to `target`.
-pub fn ensure_skill_symlink(source: &Path, target_dir: &Path) -> SyncResult {
-    let target = PathBuf::from(target_dir);
+pub fn ensure_skill_symlink(source: &Path, target: &Path) -> SyncResult {
     let skill_name = source
         .file_name()
-        .map(|s| s.to_string_lossy().to_string())
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-
-    // Source must exist
-    if !source.exists() {
-        return SyncResult {
-            skill_name: skill_name.clone(),
-            target: target.to_string_lossy().to_string(),
-            status: SyncStatus::Broken,
-        };
-    }
-
-    // Check if there is an existing symlink — if so, "Updated" not "Created"
-    let existed = match fs::symlink_metadata(&target) {
-        Ok(meta) => meta.file_type().is_symlink(),
-        Err(_) => false,
+    let status = if !source.exists() {
+        SyncStatus::Broken
+    } else {
+        apply_link(source, target).unwrap_or_else(|_| SyncStatus::Conflict(target.to_path_buf()))
     };
-
-    // If target already exists and is a symlink...
-    if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() {
-            // Check if it points to the right place
-            if let Ok(current_target) = fs::read_link(&target) {
-                if current_target == source {
-                    return SyncResult {
-                        skill_name,
-                        target: target.to_string_lossy().to_string(),
-                        status: SyncStatus::Ok,
-                    };
-                }
-                // Points somewhere else — replace it
-                let _ = fs::remove_file(&target);
-            } else {
-                // Broken symlink or unreadable — remove and recreate
-                let _ = fs::remove_file(&target);
-            }
-        } else if target.exists() {
-            // Not a symlink, and it's not empty
-            return SyncResult {
-                skill_name: skill_name.clone(),
-                target: target.to_string_lossy().to_string(),
-                status: SyncStatus::Conflict(target.clone()),
-            };
-        }
+    SyncResult {
+        skill_name,
+        target: target.to_string_lossy().into_owned(),
+        status,
     }
+}
 
-    // Create parent directories if needed
-    if let Some(parent) = target.parent() {
-        if !parent.exists() && fs::create_dir_all(parent).is_err() {
-            return SyncResult {
-                skill_name: skill_name.clone(),
-                target: target.to_string_lossy().to_string(),
-                status: SyncStatus::Conflict(target.clone()),
-            };
-        }
-    }
-
-    // Create the symlink (absolute source for portability)
-    let abs_source = if source.is_absolute() {
+fn apply_link(source: &Path, target: &Path) -> std::io::Result<SyncStatus> {
+    let source = if source.is_absolute() {
         source.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map(|c| c.join(source))
-            .unwrap_or_else(|_| source.to_path_buf())
+        std::env::current_dir()?.join(source)
     };
-
-    match create_symlink(&abs_source, &target) {
-        Ok(()) => SyncResult {
-            skill_name,
-            target: target.to_string_lossy().to_string(),
-            status: if existed {
-                SyncStatus::Updated
-            } else {
-                SyncStatus::Created
-            },
-        },
-        Err(_e) => SyncResult {
-            skill_name,
-            target: target.to_string_lossy().to_string(),
-            status: SyncStatus::Conflict(target),
-        },
+    let previous = match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Some(fs::read_link(target)?),
+        Ok(_) => return Ok(SyncStatus::Conflict(target.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if previous.as_ref() == Some(&source) {
+        return Ok(SyncStatus::Ok);
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("link requires a parent directory"))?;
+    fs::create_dir_all(parent)?;
+    if let Some(previous) = previous {
+        let staged = tempfile::tempdir_in(parent)?;
+        let link = staged.path().join("link");
+        create_symlink(&source, &link)?;
+        if fs::read_link(target)? != previous {
+            return Ok(SyncStatus::Conflict(target.to_path_buf()));
+        }
+        fs::rename(&link, target)?;
+        Ok(SyncStatus::Updated)
+    } else {
+        create_symlink(&source, target)?;
+        Ok(SyncStatus::Created)
     }
 }
 
@@ -127,57 +90,28 @@ pub(crate) fn create_symlink(source: &Path, target: &Path) -> Result<(), std::io
     }
 }
 
-/// Sync a full bundle: discover all skills and create symlinks for each.
-pub fn sync_bundle(source: &Path, pattern: &str) -> Vec<SyncResult> {
-    let skills_dir = source.join("skills");
-    if !skills_dir.exists() {
-        return vec![];
-    }
-
-    let mut results = Vec::new();
-
-    let entries = match fs::read_dir(&skills_dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let skill_path = entry.path();
-        if !crate::skill::is_skill_dir(&skill_path) {
-            // Skip files and incomplete directories.
-            continue;
-        }
-
-        // Resolve the install path using the harness pattern
-        let skill_name = skill_path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let target = expand_pattern(pattern, &skill_name);
-
-        let result = ensure_skill_symlink(&skill_path, Path::new(&target));
-        results.push(result);
-    }
-
-    results
-}
-
-/// Expand the harness pattern: replace {name} and env vars.
-fn expand_pattern(pattern: &str, skill_name: &str) -> String {
-    let with_name = pattern.replace("{name}", skill_name);
-    crate::config::expand_env_vars(&with_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn failed_replacement_retains_the_existing_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let parent = temp.path().join("target");
+        fs::create_dir(&parent).unwrap();
+        let target = parent.join("demo");
+        let previous = temp.path().join("previous");
+        create_symlink(&previous, &target).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = ensure_skill_symlink(&source, &target);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(result.status, SyncStatus::Conflict(_)));
+        assert_eq!(fs::read_link(target).unwrap(), previous);
+    }
 
     #[test]
     fn test_create_and_verify_symlink() {
@@ -259,111 +193,5 @@ mod tests {
         let result = ensure_skill_symlink(&non_existent_source, &target);
 
         assert_eq!(result.status, SyncStatus::Broken);
-    }
-
-    #[test]
-    fn test_full_sync_flow_creates_real_links() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Create source bundle structure
-        let bundle_dir = tmp.path().join("bundle");
-        let skills_dir = bundle_dir.join("skills");
-        fs::create_dir_all(skills_dir.join("caveman")).unwrap();
-        fs::File::create(skills_dir.join("caveman").join("SKILL.md")).unwrap();
-        fs::create_dir_all(skills_dir.join("code-design")).unwrap();
-        fs::File::create(skills_dir.join("code-design").join("SKILL.md")).unwrap();
-
-        // Create target harness directory structure
-        let harness_target = tmp.path().join("harness");
-        let target_skills = harness_target.join("skills");
-        fs::create_dir_all(&target_skills).unwrap();
-
-        // Run sync with absolute pattern (no env vars to expand)
-        let pattern = format!("{}", target_skills.to_string_lossy()) + "/{name}";
-        let results = sync_bundle(&bundle_dir, &pattern);
-
-        assert_eq!(results.len(), 2);
-        for result in &results {
-            assert_eq!(result.status, SyncStatus::Created);
-            let link_path = PathBuf::from(&result.target);
-            assert!(link_path.is_symlink());
-            // Verify symlink points back to source
-            let actual_target = fs::read_link(&link_path).unwrap();
-            assert!(actual_target.starts_with(&skills_dir));
-        }
-    }
-
-    #[test]
-    fn test_sync_bundle_idempotent_on_second_run() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Create source bundle
-        let bundle_dir = tmp.path().join("bundle");
-        let skills_dir = bundle_dir.join("skills");
-        fs::create_dir_all(skills_dir.join("test-skill")).unwrap();
-        fs::File::create(skills_dir.join("test-skill").join("SKILL.md")).unwrap();
-
-        // First run: create links
-        let target_skills = tmp.path().join("harness").join("skills");
-        fs::create_dir_all(&target_skills).unwrap();
-        let pattern = format!("{}", target_skills.to_string_lossy()) + "/{name}";
-        let results1 = sync_bundle(&bundle_dir, &pattern);
-        assert_eq!(results1[0].status, SyncStatus::Created);
-
-        // Second run: should be Ok
-        let results2 = sync_bundle(&bundle_dir, &pattern);
-        assert_eq!(results2[0].status, SyncStatus::Ok);
-    }
-
-    #[test]
-    fn test_sync_bundle_missing_skills_dir_returns_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bundle_dir = tmp.path().join("bundle_no_skills");
-        fs::create_dir_all(&bundle_dir).unwrap();
-
-        let results = sync_bundle(&bundle_dir, "/any/target/{name}");
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_sync_bundle_skips_non_directories() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bundle_dir = tmp.path().join("bundle");
-        let skills_dir = bundle_dir.join("skills");
-        fs::create_dir_all(&skills_dir).unwrap();
-
-        // Create a skill directory (should be picked up)
-        fs::create_dir_all(skills_dir.join("good-skill")).unwrap();
-        fs::File::create(skills_dir.join("good-skill").join("SKILL.md")).unwrap();
-        // Create a regular file (should be skipped)
-        fs::write(skills_dir.join("not-a-skill.txt"), "ignore me").unwrap();
-
-        let results = sync_bundle(&bundle_dir, "/any/target/{name}");
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn test_sync_bundle_skips_directories_without_skill_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bundle_dir = tmp.path().join("bundle");
-        let skills_dir = bundle_dir.join("skills");
-        fs::create_dir_all(skills_dir.join("incomplete")).unwrap();
-
-        let results = sync_bundle(&bundle_dir, "/any/target/{name}");
-
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_expand_pattern() {
-        let expanded = expand_pattern("$HOME/.agents/skills/{name}", "caveman");
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(expanded, format!("{}/.agents/skills/caveman", home));
-    }
-
-    #[test]
-    fn test_expand_pattern_no_placeholder() {
-        let expanded = expand_pattern("/static/path/to/skills", "anything");
-        assert_eq!(expanded, "/static/path/to/skills");
     }
 }

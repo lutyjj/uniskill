@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 /// tell its own hook from one the user wrote by hand and never clobber theirs.
 const MARKER: &str = "uniskill-managed-hook";
 
-/// Client-side git hooks. Under a global `core.hooksPath`, git looks *only*
-/// there, so any hook name we do not shim would silently stop running a repo's
-/// own hook. Shimming the whole set and chaining preserves them.
-const CLIENT_HOOKS: &[&str] = &[
+/// Standard Git hooks: https://git-scm.com/docs/githooks.
+/// Global `core.hooksPath` shadows every unlisted repository hook, so this
+/// inventory includes receive hooks and git-p4 hooks as well as client hooks.
+const GIT_HOOKS: &[&str] = &[
     "applypatch-msg",
     "pre-applypatch",
     "post-applypatch",
@@ -29,6 +29,17 @@ const CLIENT_HOOKS: &[&str] = &[
     "sendemail-validate",
     "post-index-change",
     "push-to-checkout",
+    "reference-transaction",
+    "proc-receive",
+    "pre-receive",
+    "update",
+    "post-receive",
+    "post-update",
+    "fsmonitor-watchman",
+    "p4-changelist",
+    "p4-prepare-changelist",
+    "p4-post-changelist",
+    "p4-pre-submit",
 ];
 
 /// Install the `post-checkout` hook that keeps skills present in new worktrees.
@@ -66,16 +77,25 @@ fn install_local(sync_cmd: &str) -> Result<()> {
 /// [`install_local`] so the clobber guard is testable without a real cwd.
 fn install_local_at(hooks_dir: &Path, sync_cmd: &str) -> Result<()> {
     let target = hooks_dir.join("post-checkout");
-    if let Ok(existing) = fs::read_to_string(&target) {
-        if !existing.contains(MARKER) {
-            println!(
-                "⚠ a post-checkout hook already exists at {} and was not written by uniskill.",
-                target.display()
-            );
-            println!("  Leaving it untouched. Add this line to it to enable worktree sync:");
-            println!("    {sync_cmd} >/dev/null 2>&1 || true");
-            return Ok(());
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) => {
+            let owned = metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && fs::read(&target)?
+                    .windows(MARKER.len())
+                    .any(|bytes| bytes == MARKER.as_bytes());
+            if !owned {
+                println!(
+                    "⚠ a post-checkout hook already exists at {} and was not written by uniskill.",
+                    target.display()
+                );
+                println!("  Leaving it untouched. Add this line to it to enable worktree sync:");
+                println!("    {sync_cmd} >/dev/null 2>&1 || true");
+                return Ok(());
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("failed to inspect existing hook"),
     }
 
     write_executable(&target, &local_hook(sync_cmd))?;
@@ -95,9 +115,9 @@ fn install_global(sync_cmd: &str) -> Result<()> {
     let dispatch = hooks_dir.join("dispatch");
     write_executable(&dispatch, &global_dispatch(sync_cmd))?;
 
-    // Point every client hook name at the one dispatcher so repo-local hooks of
+    // Point every standard hook name at the one dispatcher so repo-local hooks of
     // any type still run via chaining.
-    for name in CLIENT_HOOKS {
+    for name in GIT_HOOKS {
         link_or_copy(&dispatch, &hooks_dir.join(name))?;
     }
 

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ pub fn check(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
-    let state_dir = absolute_path(&state_dir.join("mcp").to_string_lossy())?;
+    let state_dir = config::destination_path(&state_dir.join("mcp"))?;
     if transaction::pending(&state_dir) {
         bail!("interrupted MCP transaction; run sync to recover before checking");
     }
@@ -87,7 +87,7 @@ pub fn sync(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
-    let state_dir = absolute_path(&state_dir.join("mcp").to_string_lossy())?;
+    let state_dir = config::destination_path(&state_dir.join("mcp"))?;
     let desired = desired_entries(servers, registry, worktree)?;
     if desired.is_empty() && !state_dir.exists() {
         return Ok(Report::default());
@@ -100,7 +100,7 @@ pub fn sync(
         .map(|identity| identity.path.clone())
         .collect();
     for update in transaction::journal_updates(&state_dir)? {
-        let path = absolute_path(&update.path.to_string_lossy())?;
+        let path = config::destination_path(&update.path)?;
         if path == state_dir.join("state.json") {
             paths.extend(
                 decode_owned(update.before.as_deref().map(str::as_bytes))?
@@ -117,41 +117,6 @@ pub fn sync(
     transaction::commit(&state_dir, plan.updates)?;
     plan.report.preserved = preserved;
     Ok(plan.report)
-}
-
-fn absolute_path(path: &str) -> Result<PathBuf> {
-    if path.contains('$') {
-        bail!("MCP target has an unresolved environment variable");
-    }
-    let path = Path::new(path);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::CurDir => {}
-            part => normalized.push(part.as_os_str()),
-        }
-    }
-    if normalized.file_name().is_none() {
-        bail!("MCP target must name a file");
-    }
-    let mut ancestor = normalized.parent().expect("absolute file has a parent");
-    while !ancestor.exists() {
-        ancestor = ancestor
-            .parent()
-            .ok_or_else(|| anyhow!("MCP target has no existing ancestor"))?;
-    }
-    normalized = ancestor
-        .canonicalize()?
-        .join(normalized.strip_prefix(ancestor)?);
-    Ok(normalized)
 }
 
 fn fingerprint(value: &Value) -> Result<String> {
@@ -194,7 +159,7 @@ fn desired_entries(
             let target = harness.mcp.as_ref().ok_or_else(|| {
                 anyhow!("MCP server {name}: harness {harness_name} has no MCP target")
             })?;
-            let path = absolute_path(&config::expand_env_vars(&target.path))?;
+            let path = config::destination_path(Path::new(&target.path))?;
             let path = match worktree {
                 Some(ctx) => match ctx.retarget(&path.to_string_lossy()) {
                     Some(path) => PathBuf::from(path),
@@ -250,7 +215,7 @@ fn decode_owned(bytes: Option<&[u8]>) -> Result<BTreeMap<Identity, Owned>> {
         {
             bail!("invalid MCP ownership identity");
         }
-        entry.identity.path = absolute_path(&entry.identity.path.to_string_lossy())?;
+        entry.identity.path = config::destination_path(&entry.identity.path)?;
         if owned.insert(entry.identity.clone(), entry).is_some() {
             bail!("duplicate MCP ownership identity");
         }

@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,23 +24,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Extract version
+      - name: Validate release source
         id: version
-        shell: bash
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            tag="${GITHUB_REF#refs/tags/}"
-          else
-            tag="v${version}"
-          fi
-          if [[ "$tag" != "v${version}" ]]; then
-            echo "tag ${tag} does not match Cargo.toml version ${version}" >&2
-            exit 1
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+        run: scripts/release-version.sh
 
       - name: Install Rust
         run: |
@@ -83,22 +71,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract version
+      - name: Validate release source
         id: version
-        shell: bash
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            tag="${GITHUB_REF#refs/tags/}"
-          else
-            tag="v${version}"
-          fi
-          if [[ "$tag" != "v${version}" ]]; then
-            echo "tag ${tag} does not match Cargo.toml version ${version}" >&2
-            exit 1
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+        run: scripts/release-version.sh
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -147,7 +122,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: uniskill ${{ steps.version.outputs.tag }}
           body: ${{ steps.changelog.outputs.content }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ steps.version.outputs.commit }}
           files: |
             release/uniskill-darwin-arm64-${{ steps.version.outputs.tag }}
             release/uniskill-darwin-arm64-${{ steps.version.outputs.tag }}.tar.gz

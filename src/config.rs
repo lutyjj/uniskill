@@ -2,7 +2,23 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// The same normalized identity selects a download job and its cached checkout.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct GitSource {
+    pub repo: String,
+    pub git_ref: Option<String>,
+}
+
+impl GitSource {
+    pub fn new(repo: &str, git_ref: Option<&str>) -> Self {
+        Self {
+            repo: normalize_repo_url(repo),
+            git_ref: git_ref.map(str::to_owned),
+        }
+    }
+}
 
 /// A bundle routes a set of skills into one or more harnesses.
 ///
@@ -183,7 +199,12 @@ pub struct ProjectConfigFile {
 /// Resolve environment variables in a string.
 /// Supports $VAR and ${VAR} syntax. Unresolvable vars pass through unchanged.
 pub fn expand_env_vars(s: &str) -> String {
+    expand_variables(s).0
+}
+
+fn expand_variables(s: &str) -> (String, bool) {
     let mut result = String::with_capacity(s.len());
+    let mut unresolved = false;
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -207,17 +228,24 @@ pub fn expand_env_vars(s: &str) -> String {
 
                 if closed {
                     if let Some((name, fallback)) = var_name.split_once(":-") {
-                        result.push_str(
-                            &env::var(name).unwrap_or_else(|_| expand_env_vars(fallback)),
-                        );
+                        match env::var(name) {
+                            Ok(value) => result.push_str(&value),
+                            Err(_) => {
+                                let (value, missing) = expand_variables(fallback);
+                                result.push_str(&value);
+                                unresolved |= missing;
+                            }
+                        }
                     } else if let Ok(value) = env::var(&var_name) {
                         result.push_str(&value);
                     } else {
+                        unresolved = true;
                         result.push_str("${");
                         result.push_str(&var_name);
                         result.push('}');
                     }
                 } else {
+                    unresolved = true;
                     result.push('$');
                     result.push('{');
                     result.push_str(&var_name);
@@ -237,6 +265,7 @@ pub fn expand_env_vars(s: &str) -> String {
                 if let Ok(value) = env::var(&var_name) {
                     result.push_str(&value);
                 } else {
+                    unresolved = true;
                     result.push('$');
                     result.push_str(&var_name);
                 }
@@ -245,7 +274,7 @@ pub fn expand_env_vars(s: &str) -> String {
         }
     }
 
-    result
+    (result, unresolved)
 }
 
 /// Parse config from a file path. Falls back to default config path if none given.
@@ -281,7 +310,7 @@ fn load_config(
     let mut config: Config = toml::from_str(&content)
         .map_err(|_| AppError::InvalidConfig(format!("cannot parse config {}", real.display())))?;
     let base = real.parent().expect("canonical file has a parent");
-    anchor_paths(&mut config, base);
+    anchor_paths(&mut config, base)?;
     for include in config.includes.clone() {
         let child_path = resolve_source_from(&include, base);
         let child = load_config(&child_path, seen, depth + 1)?;
@@ -322,7 +351,16 @@ fn load_config(
             .validate()
             .map_err(|e| AppError::InvalidConfig(format!("MCP server {name}: {e}")))?;
     }
+    for (name, bundle) in &config.bundles {
+        validate_component(name).map_err(|e| AppError::InvalidConfig(e.to_string()))?;
+        for skill in bundle.skills.keys() {
+            validate_component(skill).map_err(|e| AppError::InvalidConfig(e.to_string()))?;
+        }
+    }
     for harness in config.harnesses.values() {
+        if let Some(pattern) = &harness.pattern {
+            validate_pattern(pattern).map_err(|e| AppError::InvalidConfig(e.to_string()))?;
+        }
         if let Some(target) = &harness.mcp {
             target
                 .validate()
@@ -332,7 +370,7 @@ fn load_config(
     Ok(config)
 }
 
-fn anchor_paths(config: &mut Config, base: &Path) {
+fn anchor_paths(config: &mut Config, base: &Path) -> crate::error::Result<()> {
     for harness in config.harnesses.values_mut() {
         if let Some(pattern) = &mut harness.pattern {
             *pattern = resolve_source_from(pattern, base)
@@ -340,22 +378,121 @@ fn anchor_paths(config: &mut Config, base: &Path) {
                 .into_owned();
         }
         if let Some(target) = &mut harness.mcp {
-            target.path = resolve_source_from(&target.path, base)
-                .to_string_lossy()
-                .into_owned();
+            target.path = resolve_native_path(&target.path, base)
+                .map_err(|e| crate::error::AppError::InvalidConfig(e.to_string()))?;
         }
     }
     for bundle in config.bundles.values_mut() {
-        for source in std::iter::once(&mut bundle.source).chain(bundle.skills.values_mut()) {
-            if let Some(path) = &mut source.source {
-                *path = resolve_source_from(path, base)
-                    .to_string_lossy()
-                    .into_owned();
+        anchor_bundle_paths(bundle, base);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_component(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name.len() > 255
+        || name.starts_with('.')
+        || name.contains(['/', '\\', '\0'])
+    {
+        anyhow::bail!("bundle and skill identities must be single non-hidden path components");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pattern(pattern: &str) -> anyhow::Result<()> {
+    if !pattern.contains("{name}") {
+        anyhow::bail!("skill target pattern requires a {{name}} placeholder");
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_native_path(path: &str, base: &Path) -> anyhow::Result<String> {
+    let (expanded, unresolved) = expand_variables(path);
+    if unresolved {
+        anyhow::bail!("MCP target has an unresolved environment variable");
+    }
+    let path = PathBuf::from(expanded);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+    .to_string_lossy()
+    .into_owned())
+}
+
+/// Resolve destination aliases through existing parents without following the
+/// final entry, which may be a managed symlink or a foreign file.
+pub(crate) fn destination_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("destination requires a file name"))?;
+    let mut parent = PathBuf::new();
+    for component in absolute
+        .parent()
+        .expect("absolute path has parent")
+        .components()
+    {
+        match component {
+            std::path::Component::ParentDir => {
+                parent.pop();
             }
-            if let Some(repo) = &mut source.repo {
-                *repo = resolve_repo_from(repo, base);
+            std::path::Component::CurDir => {}
+            component => {
+                parent.push(component.as_os_str());
+                match std::fs::symlink_metadata(&parent) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        parent = parent.canonicalize()?;
+                    }
+                    Ok(metadata) if !metadata.is_dir() => anyhow::bail!(
+                        "destination parent is not a directory: {}",
+                        parent.display()
+                    ),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
+    }
+    Ok(parent.join(name))
+}
+
+pub(crate) fn anchor_bundle_paths(bundle: &mut Bundle, base: &Path) {
+    for source in std::iter::once(&mut bundle.source).chain(bundle.skills.values_mut()) {
+        if let Some(path) = &mut source.source {
+            *path = resolve_source_from(path, base)
+                .to_string_lossy()
+                .into_owned();
+        }
+        if let Some(repo) = &mut source.repo {
+            *repo = resolve_repo_from(repo, base);
+        }
+    }
+}
+
+fn normalize_repo_url(repo: &str) -> String {
+    let github = repo
+        .strip_prefix("gh:")
+        .or_else(|| repo.strip_prefix("github:"));
+    let mut parts = repo.split('/');
+    let shorthand = matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(owner), Some(name), None)
+            if !owner.is_empty() && !name.is_empty() && !repo.contains(':')
+                && !repo.starts_with('.') && !repo.starts_with('/')
+    );
+    match github.or_else(|| shorthand.then_some(repo)) {
+        Some(path) => format!(
+            "git@github.com:{}.git",
+            path.strip_suffix(".git").unwrap_or(path)
+        ),
+        None => repo.into(),
     }
 }
 
@@ -420,6 +557,19 @@ fn is_local_repo_reference(repo: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn destination_identity_resolves_symlink_parents_before_parent_components() {
+        let temp = tempfile::tempdir().unwrap();
+        let physical = temp.path().join("physical");
+        std::fs::create_dir_all(physical.join("child")).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(physical.join("child"), &alias).unwrap();
+        assert_eq!(
+            destination_path(&alias.join("../target/demo")).unwrap(),
+            physical.join("target/demo")
+        );
+    }
 
     fn write_temp_toml(content: &str) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();
