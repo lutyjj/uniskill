@@ -18,16 +18,6 @@ pub struct WorktreeContext {
 }
 
 impl WorktreeContext {
-    /// Check the physical destination after resolving parent aliases.
-    pub fn destination(&self, path: &Path) -> anyhow::Result<PathBuf> {
-        let destination = crate::filesystem::destination_path(path)?;
-        let root = self.worktree_root.canonicalize()?;
-        if !destination.starts_with(&root) || destination == root {
-            anyhow::bail!("worktree destination lies outside its checkout");
-        }
-        Ok(destination)
-    }
-
     /// Detect the worktree topology for `dir`.
     ///
     /// Returns `None` when `dir` is not inside a git worktree, or when it is the
@@ -119,6 +109,16 @@ mod tests {
     }
 
     #[test]
+    fn retargets_pattern_under_main_root() {
+        let c = ctx("/home/u/proj", "/home/u/proj/.git/worktrees-checkout/feat");
+        let out = c.retarget("/home/u/proj/.agents/skills/{name}");
+        assert_eq!(
+            out.as_deref(),
+            Some("/home/u/proj/.git/worktrees-checkout/feat/.agents/skills/{name}")
+        );
+    }
+
+    #[test]
     fn preserves_name_placeholder_and_nested_subpath() {
         let c = ctx("/repo", "/wt");
         assert_eq!(
@@ -140,6 +140,12 @@ mod tests {
         assert_eq!(c.retarget("/repo/wt/feat/.agents/skills/{name}"), None);
     }
 
+    #[test]
+    fn ignores_other_repo() {
+        let c = ctx("/home/u/proj", "/home/u/proj/wt/feat");
+        assert_eq!(c.retarget("/home/u/other/.agents/skills/{name}"), None);
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .arg("-C")
@@ -152,7 +158,7 @@ mod tests {
 
     #[test]
     fn detect_distinguishes_main_and_linked_worktree() {
-        let tmp = crate::test_support::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let main = tmp.path().join("repo");
         std::fs::create_dir_all(&main).unwrap();
         git(&main, &["init", "-q"]);
@@ -181,7 +187,7 @@ mod tests {
 
     #[test]
     fn detect_returns_none_outside_git() {
-        let tmp = crate::test_support::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         assert_eq!(WorktreeContext::detect(tmp.path()), None);
     }
 }

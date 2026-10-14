@@ -8,7 +8,6 @@ use crate::config;
 use crate::harnesses;
 use crate::hook;
 use crate::linker;
-use crate::mcp;
 use crate::sync::{self, SyncEvent, SyncReport};
 use crate::worktree;
 
@@ -25,25 +24,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sync declared skill bundles and MCP servers.
+    /// Create or update symlinks for all declared bundles.
     Sync {
         /// Retarget links into the current git worktree instead of the paths
         /// written in config. Run from inside a linked worktree; used by the
         /// post-checkout hook.
         #[arg(long)]
         worktree: bool,
-        /// Check MCP definitions without fetching skills or writing files.
-        #[arg(long)]
-        check_mcp: bool,
-        /// Take ownership of existing MCP entries only when definitions match.
-        #[arg(long)]
-        adopt_mcp: bool,
-        /// Maximum simultaneous remote fetches.
-        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
-        jobs: u8,
-        /// Sync only MCP definitions without fetching or linking skills.
-        #[arg(long, conflicts_with = "check_mcp")]
-        mcp_only: bool,
     },
     /// Manage the git hook that keeps worktrees in sync.
     Hook {
@@ -70,23 +57,11 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Sync {
-            worktree,
-            check_mcp,
-            adopt_mcp,
-            jobs,
-            mcp_only,
-        } => {
-            let options = SyncOptions {
-                check: *check_mcp,
-                adopt: *adopt_mcp,
-                jobs: usize::from(*jobs),
-                only: *mcp_only,
-            };
+        Commands::Sync { worktree } => {
             if *worktree {
-                sync_current_worktree(cli.config.as_deref(), options)
+                sync_current_worktree(cli.config.as_deref())
             } else {
-                run_normal_sync(cli.config.clone(), options)
+                run_normal_sync(cli.config.clone())
             }
         }
         Commands::Hook { action } => match action {
@@ -96,17 +71,9 @@ pub fn run() -> Result<()> {
 }
 
 /// Sync every bundle into the paths declared in config (the default command).
-#[derive(Clone, Copy)]
-struct SyncOptions {
-    check: bool,
-    adopt: bool,
-    jobs: usize,
-    only: bool,
-}
-
-fn run_normal_sync(explicit_config: Option<PathBuf>, options: SyncOptions) -> Result<()> {
+fn run_normal_sync(explicit_config: Option<PathBuf>) -> Result<()> {
     if let Some(explicit_config) = explicit_config {
-        sync_from_path(explicit_config, options)
+        sync_from_path(explicit_config)
     } else {
         match config::discover_project_config()? {
             Some(project_config) => {
@@ -115,13 +82,13 @@ fn run_normal_sync(explicit_config: Option<PathBuf>, options: SyncOptions) -> Re
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                sync_project(&project_config.config, config_dir, options)
+                sync_project(&project_config.config, config_dir)
             }
             None => {
                 let default_path = dirs::config_dir()
                     .map(|d| d.join("uniskill").join("config.toml"))
                     .unwrap_or_else(|| PathBuf::from("./config.toml"));
-                sync_from_path(default_path, options)
+                sync_from_path(default_path)
             }
         }
     }
@@ -132,7 +99,7 @@ fn run_normal_sync(explicit_config: Option<PathBuf>, options: SyncOptions) -> Re
 /// Resolves the same bundles and harnesses a normal sync would, but rewrites
 /// each repo-scoped harness path onto this worktree and links from the cache the
 /// main sync already assembled. A no-op outside a linked worktree.
-fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -> Result<()> {
+fn sync_current_worktree(explicit_config: Option<&Path>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let Some(ctx) = worktree::WorktreeContext::detect(&cwd) else {
         println!("not inside a linked git worktree — nothing to sync");
@@ -143,45 +110,6 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
     // Keep the worktree's manifest in the worktree itself: scoped so a main sync
     // never prunes these links, and self-cleaning when the worktree is removed.
     let state_dir = ctx.worktree_root.join(".uniskill-cache");
-    ctx.destination(&state_dir.join("state.toml"))?;
-
-    let storage = crate::cache::storage(&inputs.cache_dir, &state_dir)?;
-    let shared_mcp = mcp::reservations(&inputs.cache_dir)?;
-    for path in &shared_mcp.entries {
-        storage.validate_write(path)?;
-    }
-    let mut mcp_report = if options.check {
-        mcp::check(
-            &inputs.mcp,
-            &inputs.registry,
-            &state_dir,
-            Some(&ctx),
-            options.adopt,
-            &storage,
-        )?
-    } else {
-        mcp::sync(
-            &inputs.mcp,
-            &inputs.registry,
-            &state_dir,
-            Some(&ctx),
-            options.adopt,
-            &storage,
-        )?
-    };
-    print_mcp_report(&mcp_report);
-    if options.check {
-        return finish_mcp_check(&mcp_report);
-    }
-    if options.only {
-        return Ok(());
-    }
-
-    mcp_report
-        .reservations
-        .directories
-        .extend(shared_mcp.directories);
-    mcp_report.reservations.entries.extend(shared_mcp.entries);
 
     let report = sync::sync_worktree(
         &inputs.bundles,
@@ -189,16 +117,14 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
         &inputs.cache_dir,
         &state_dir,
         &ctx,
-        &mcp_report.reservations,
     );
     print_report(&report);
 
     if report.summary.has_failures() {
         Err(anyhow::anyhow!(
-            "worktree sync completed with {} conflict(s), {} broken link(s), and {} state error(s)",
+            "worktree sync completed with {} conflict(s) and {} broken link(s)",
             report.summary.conflicts,
-            report.summary.broken,
-            report.summary.errors
+            report.summary.broken
         ))
     } else {
         Ok(())
@@ -208,7 +134,6 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
 /// Bundles, harness registry, and assembled-cache location for a worktree sync.
 struct WorktreeInputs {
     bundles: HashMap<String, config::Bundle>,
-    mcp: std::collections::BTreeMap<String, mcp::Server>,
     registry: HashMap<String, harnesses::HarnessDef>,
     cache_dir: PathBuf,
 }
@@ -224,8 +149,7 @@ fn worktree_inputs(
     if let Some(path) = explicit_config {
         let config = config::parse_config(path)?;
         return Ok(WorktreeInputs {
-            registry: harnesses::registry(&config)?,
-            mcp: config.mcp,
+            registry: merge_global_registry(&config),
             bundles: config.bundles,
             cache_dir: shared_cache_dir(),
         });
@@ -233,10 +157,9 @@ fn worktree_inputs(
 
     let project_config = ctx.main_root.join("uniskill.toml");
     if project_config.exists() {
-        let config = config::parse_config(&project_config)?;
+        let config = config::parse_project_config(&project_config)?;
         return Ok(WorktreeInputs {
-            registry: harnesses::registry(&config)?,
-            mcp: config.mcp,
+            registry: merge_project_registry(&config, &ctx.main_root),
             bundles: config.bundles,
             cache_dir: ctx.main_root.join(".uniskill-cache"),
         });
@@ -247,8 +170,7 @@ fn worktree_inputs(
         .unwrap_or_else(|| PathBuf::from("./config.toml"));
     let config = config::parse_config(&default_path)?;
     Ok(WorktreeInputs {
-        registry: harnesses::registry(&config)?,
-        mcp: config.mcp,
+        registry: merge_global_registry(&config),
         bundles: config.bundles,
         cache_dir: shared_cache_dir(),
     })
@@ -256,128 +178,103 @@ fn worktree_inputs(
 
 /// Shared cache directory for globally-configured bundles.
 fn shared_cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(dirs::cache_dir)
+    dirs::cache_dir()
         .map(|d| d.join(DEFAULT_CACHE_DIR))
         .unwrap_or_else(|| PathBuf::from("./.uniskill-cache"))
 }
 
-/// Sync from an explicit global config path.
-fn sync_from_path(config_path: PathBuf, options: SyncOptions) -> Result<()> {
-    let config = config::parse_config(&config_path)?;
+/// Merge user-defined global harnesses over the built-in defaults.
+fn merge_global_registry(config: &config::Config) -> HashMap<String, harnesses::HarnessDef> {
+    let mut registry = harnesses::default_harnesses();
+    for (name, harness) in &config.harnesses {
+        let label = harness.label.clone().unwrap_or_else(|| name.clone());
+        registry.insert(
+            name.clone(),
+            harnesses::HarnessDef {
+                label,
+                pattern: harness.pattern.clone(),
+            },
+        );
+    }
+    registry
+}
 
-    let registry = harnesses::registry(&config)?;
+/// Merge project-local harnesses (relative patterns resolved against
+/// `config_dir`) over the built-in defaults.
+fn merge_project_registry(
+    project_config: &config::ProjectConfig,
+    config_dir: &Path,
+) -> HashMap<String, harnesses::HarnessDef> {
+    let mut registry = harnesses::default_harnesses();
+    for (name, local_harness) in &project_config.project_harnesses {
+        let resolved = config_dir.join(&local_harness.pattern);
+        let label = local_harness.label.clone().unwrap_or_else(|| name.clone());
+        registry.insert(
+            name.clone(),
+            harnesses::HarnessDef {
+                label,
+                pattern: resolved.to_string_lossy().to_string(),
+            },
+        );
+    }
+    registry
+}
+
+/// Sync from an explicit global config path.
+fn sync_from_path(config_path: PathBuf) -> Result<()> {
+    let config = config::parse_config(&config_path)?;
+    let config_dir = config_base_dir(&config_path);
+
+    let registry = merge_global_registry(&config);
     let cache_dir = shared_cache_dir();
 
-    run_sync(&config, &registry, &cache_dir, options)
+    run_sync(&config.bundles, &registry, &cache_dir, &config_dir)
+}
+
+/// Directory that a global config's relative sources resolve against.
+///
+/// The config path is canonicalized first, so a config symlinked into
+/// `~/.config/uniskill/config.toml` still resolves `../bundles/...` against the
+/// real file's directory instead of the symlink's location.
+fn config_base_dir(config_path: &Path) -> PathBuf {
+    let resolved = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    resolved
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Sync using a project-local config with relative paths.
-fn sync_project(
-    project_config: &config::Config,
-    config_dir: PathBuf,
-    options: SyncOptions,
-) -> Result<()> {
-    let registry = harnesses::registry(project_config)?;
+fn sync_project(project_config: &config::ProjectConfig, config_dir: PathBuf) -> Result<()> {
+    let registry = merge_project_registry(project_config, &config_dir);
 
     // Use project-local cache directory for assembled bundles.
     let cache_dir = config_dir.join(".uniskill-cache");
 
-    run_sync(project_config, &registry, &cache_dir, options)
+    run_sync(&project_config.bundles, &registry, &cache_dir, &config_dir)
 }
 
 fn run_sync(
-    config: &config::Config,
+    bundles: &HashMap<String, config::Bundle>,
     registry: &HashMap<String, harnesses::HarnessDef>,
     cache_dir: &Path,
-    options: SyncOptions,
+    source_base_dir: &Path,
 ) -> Result<()> {
-    let storage = crate::cache::storage(cache_dir, cache_dir)?;
-    let mcp_report = if options.check {
-        mcp::check(
-            &config.mcp,
-            registry,
-            cache_dir,
-            None,
-            options.adopt,
-            &storage,
-        )?
-    } else {
-        mcp::sync(
-            &config.mcp,
-            registry,
-            cache_dir,
-            None,
-            options.adopt,
-            &storage,
-        )?
-    };
-    print_mcp_report(&mcp_report);
-    if options.check {
-        return finish_mcp_check(&mcp_report);
-    }
-    if options.only {
-        return Ok(());
-    }
     // A normal sync keeps its manifest in the cache dir.
-    let report = sync::sync_with_progress(
-        &config.bundles,
-        registry,
-        cache_dir,
-        cache_dir,
-        &mcp_report.reservations,
-        options.jobs,
-        &mut print_fetch_progress,
-    );
+    let report = sync::sync_with_registry(bundles, registry, cache_dir, cache_dir, source_base_dir);
     print_report(&report);
 
     if report.summary.has_failures() {
         Err(anyhow::anyhow!(
-            "sync completed with {} conflict(s), {} broken link(s), and {} state error(s)",
+            "sync completed with {} conflict(s) and {} broken link(s)",
             report.summary.conflicts,
-            report.summary.broken,
-            report.summary.errors
+            report.summary.broken
         ))
     } else {
         Ok(())
     }
-}
-
-fn print_fetch_progress(progress: crate::fetch_plan::Progress) {
-    use crate::fetch_plan::Progress;
-    match progress {
-        Progress::Assembling { bundle } => println!("  assemble {bundle}"),
-        Progress::Linking { bundle } => println!("  link {bundle}"),
-        Progress::Plan { bundles, remote_sources, workers } => println!("plan: {bundles} bundles, {remote_sources} distinct remote sources, {workers} fetch workers"),
-        Progress::Started { label, kind } => println!("  fetch {label} [{kind}]"),
-        Progress::Finished { label, seconds, success } => println!("  fetch {label}: {} ({seconds:.2}s)", if success { "ready" } else { "failed" }),
-    }
-}
-
-fn print_mcp_report(report: &mcp::Report) {
-    for path in &report.preserved {
-        eprintln!(
-            "MCP recovery preserved an external edit: {}",
-            path.display()
-        );
-    }
-    for event in &report.events {
-        println!(
-            "  MCP {} [{}] -> {}",
-            event.server,
-            event.status,
-            event.target.display()
-        );
-    }
-}
-
-fn finish_mcp_check(report: &mcp::Report) -> Result<()> {
-    if report.changed {
-        anyhow::bail!("MCP definitions need syncing");
-    }
-    Ok(())
 }
 
 fn print_report(report: &SyncReport) {
@@ -390,8 +287,23 @@ fn print_report(report: &SyncReport) {
 
 fn print_event(event: &SyncEvent) {
     match event {
+        SyncEvent::BundleSkippedNoSources { bundle } => {
+            println!("  ! bundle '{}' has no source or skills — skipping", bundle);
+        }
         SyncEvent::BundleFailed { bundle, error } => {
             println!("  ✗ bundle '{}': {}", bundle, error);
+        }
+        SyncEvent::UnknownHarness { bundle, harness } => {
+            println!(
+                "  ⚠ bundle '{}': unknown harness '{}' — skipping",
+                bundle, harness
+            );
+        }
+        SyncEvent::BundleNotAssembled { bundle } => {
+            println!(
+                "  ⚠ bundle '{}': not in cache — run `uniskill sync` first",
+                bundle
+            );
         }
         SyncEvent::SkillSynced {
             skill_name,
@@ -429,11 +341,8 @@ fn print_event(event: &SyncEvent) {
                 skill, harness
             );
         }
-        SyncEvent::PruneFailed { path, error } => {
-            eprintln!("error: cannot remove managed link {path}: {error}");
-        }
-        SyncEvent::StateFailed { error } => {
-            eprintln!("error: uniskill state: {}", error);
+        SyncEvent::StateWriteFailed { error } => {
+            eprintln!("warning: failed to write uniskill state: {}", error);
         }
     }
 }
@@ -448,4 +357,36 @@ fn print_status(report: &SyncReport) {
         report.summary.skipped(),
         report.summary.pruned
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_base_dir_follows_a_symlinked_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Real config lives in one directory...
+        let real_dir = tmp.path().join("agent-skills").join("configs");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real_config = real_dir.join("global.toml");
+        std::fs::write(&real_config, "").unwrap();
+
+        // ...and is symlinked into the default config location.
+        let link_dir = tmp.path().join(".config").join("uniskill");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("config.toml");
+        std::os::unix::fs::symlink(&real_config, &link).unwrap();
+
+        // Relative sources must resolve against the real directory, not the link.
+        assert_eq!(config_base_dir(&link), real_dir.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn config_base_dir_of_plain_file_is_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        assert_eq!(config_base_dir(&config), tmp.path().canonicalize().unwrap());
+    }
 }

@@ -11,11 +11,9 @@ read [README.md](README.md), [docs/DESIGN.md](docs/DESIGN.md), and
 
 ## Keep the sync contract safe
 
-`sync` must be deterministic, idempotent, and conservative with user files. Reapplying an already converged configuration must not rewrite files, recreate symlinks, change ownership state, or update modification times.
-Never delete or replace a user-owned skill file or directory. Only prune symlinks recorded
-in the manifest and still pointing into the uniskill cache. MCP sync may edit
-only owned server entries in native files; unrelated settings and entries stay
-intact. Adoption requires an identical existing definition.
+`sync` must be deterministic, idempotent, and conservative with user files.
+Never delete or replace a user-owned path. Only remove symlinks recorded in the
+manifest and still pointing into the uniskill cache.
 
 Failed bundle builds are failures, not removals. Preserve the previous cache
 and previous managed links when a source cannot be fetched, a source is invalid,
@@ -34,21 +32,16 @@ Modules own narrow jobs:
 
 | Module | Job |
 | --- | --- |
-| `cli.rs` | CLI parsing, config discovery, sync orchestration, reporting, exit codes |
-| `config.rs` | TOML shapes, source validation, and config-relative path expansion |
-| `cache.rs` | Storage namespaces, physical cache identity, and bundle lifecycle paths |
-| `filesystem.rs` | Physical paths, alias dependencies, and shared resource protection |
+| `cli.rs` | CLI parsing, config discovery, report printing, exit codes |
+| `config.rs` | TOML shapes, source validation, env var and path resolution |
 | `fetcher.rs` | Materializing local, URL, and git sources into the bundle cache |
-| `harnesses.rs` | Registry loading and configurable skill/MCP destinations |
-| `fetch_plan.rs` | Deduplicated, bounded remote downloads and progress |
-| `mcp/` | Server rendering, native documents, ownership, transactional writes |
-| `persistence.rs` | Bounded regular-file reads and atomic, durable replacement |
+| `harnesses.rs` | Built-in harness registry |
 | `hook.rs` | Installing the `post-checkout` git hook and global dispatcher |
 | `linker.rs` | Harness symlink creation and status classification |
 | `skill.rs` | Shared skill-directory predicate |
 | `state.rs` | Manifest load/save and managed-link ownership checks |
-| `sync.rs` | Skill planning, exposed-root checks, reconciliation, and reports |
-| `worktree.rs` | Git worktree topology, retargeting, and physical destination scope |
+| `sync.rs` | Sync orchestration and structured reports |
+| `worktree.rs` | Git worktree topology and harness-path retargeting |
 
 Do not move filesystem mutation, output formatting, and config parsing into the
 same function. If a change crosses those boundaries, add a small API between
@@ -59,8 +52,8 @@ the modules instead.
 Each shared fact has one owner:
 
 - Rust version: `rust-toolchain.toml`
-- Built-in harness definitions: `src/harnesses.toml`
-- Source shape and Git identity: `config::SourceSpec`, `config::Source`, and `config::GitSource`
+- Built-in harnesses: `harnesses::default_harnesses()`
+- Source shape: `config::SourceSpec` and `config::Source`
 - Skill directory rule: `skill::is_skill_dir`
 - Release gate: `make release`
 - GitHub release asset naming: `.github/workflows/release.yml`
@@ -82,23 +75,21 @@ should not add conditionals through `cli`, `linker`, or tests that do not own
 source fetching.
 
 New harnesses should be config-only unless they are built-ins. New built-ins go
-only in `src/harnesses.toml`.
+only in `harnesses::default_harnesses()`.
 
 ## Write meaningful tests
 
-Build filesystem fixtures with `tests/support/mod.rs`; add explicit symlinks for
-alias cases.
+Tests should prove behavior, ownership, and failure modes. Add regression tests
+for any change that affects:
 
-Define test scope by the behavior it proves, not by its Cargo test target:
+- cache replacement
+- pruning
+- symlink conflict handling
+- source validation
+- git fetch/update behavior
+- release or CI contracts
 
-- Configuration, source selection, rendering policy, and path retargeting are behavioral units. Test their stable interfaces and independently derived outcomes.
-- Git, HTTP, filesystem, and generated-hook checks are boundary tests even when located inside `src/`. Use real disposable resources where native semantics matter.
-- `tests/*_cli.rs` contains application workflows. Keep essential install/update/prune, ownership, preservation, and recovery wiring here; put decision matrices at their owning boundary.
-- `tests/release.rs` executes the release validator against controlled Git histories.
-
-Retain a regression when it protects a distinct failure mechanism. Delete no-op, source-text, library-mechanics, and redundant scenarios. Do not add a test per helper or repeat every boundary case through the CLI. Compatible internal refactors should ordinarily preserve behavioral assertions.
-
-Assertions must verify the claimed effect. A successful exit, a status enum, or a file's existence alone does not establish correct contents, preservation, ownership, or idempotency. Keep fixtures small and execution environments independent of operator credentials and configuration.
+Do not write tests that only mirror implementation details.
 
 ## Run the checks
 
