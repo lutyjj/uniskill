@@ -351,7 +351,8 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
     let key = format!("{:x}", Sha256::digest(serde_json::to_vec(source)?));
     let repo_dir = base_dir.join("repos").join(key);
 
-    if repo_dir.exists() {
+    let cached = repo_dir.exists();
+    if cached {
         if let Some(commit) = immutable_commit {
             let object = Command::new("git")
                 .arg("-C")
@@ -381,7 +382,22 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
                 return Ok(repo_dir);
             }
         }
-        run_git(&repo_dir, &["fetch", "--quiet", "--prune", "origin"])?;
+        if git_ref.is_none() {
+            run_git(
+                &repo_dir,
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--refmap=",
+                    "--",
+                    "origin",
+                    "HEAD",
+                ],
+            )?;
+        } else {
+            run_git(&repo_dir, &["fetch", "--quiet", "--prune", "origin"])?;
+        }
     } else {
         if let Some(parent) = repo_dir.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -408,8 +424,8 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
             None => resolve_git_ref(&repo_dir, requested_ref)?,
         };
         run_git(&repo_dir, &["checkout", "--quiet", "--detach", &commit])?;
-    } else {
-        run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "@{upstream}"])?;
+    } else if cached {
+        run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "FETCH_HEAD"])?;
     }
 
     Ok(repo_dir)
@@ -483,6 +499,9 @@ fn copy_dir_all(source: &Path, dest: &Path) -> Result<()> {
         fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
     {
         let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
         let source_path = entry.path();
         let dest_path = dest.join(entry.file_name());
         if entry.file_type()?.is_dir() {

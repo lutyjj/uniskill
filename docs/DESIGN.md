@@ -52,6 +52,7 @@ bundle:
 
 Remote `repo` and `url` sources are always copied regardless of `link`: the git
 cache and a downloaded file are not working trees to edit against.
+Copies omit entries named `.git`.
 
 ### Source
 
@@ -115,7 +116,7 @@ uniskill clones or fetches the repository into the cache and copies the selected
 skill directory into the assembled bundle. Explicit branches and tags resolve
 by exact ref name to commit IDs before checkout, so filesystem aliases cannot
 select a different revision. An explicit `ref` uses a detached checkout; an
-omitted `ref` follows the clone's upstream branch.
+omitted `ref` follows the remote's `HEAD` without relying on cached tracking refs.
 
 Full commit IDs take precedence over names on initial fetch and cache reuse.
 Use `refs/heads/...` or `refs/tags/...` for a branch or tag whose name looks like

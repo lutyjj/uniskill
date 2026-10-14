@@ -1808,6 +1808,54 @@ fn full_commit_ids_keep_precedence_over_hash_named_refs() {
 }
 
 #[test]
+fn default_git_sources_update_without_cached_upstream_metadata() {
+    let f = Fixture::new();
+    let origin = f.repo("origin");
+    f.skill("origin/skill", "initial");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "initial"]));
+    let config = f.write("config.toml", "[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\n[bundles.one.skills.demo]\nrepo='./origin'\npath='skill'\n");
+    success(f.run(&config, &[]));
+    for entry in fs::read_dir(f.path("cache/uniskill/repos")).unwrap() {
+        success(f.git(
+            &entry.unwrap().path(),
+            &["config", "--unset", "branch.main.remote"],
+        ));
+    }
+    f.skill("origin/skill", "updated");
+    success(f.git(&origin, &["commit", "-qam", "updated"]));
+    success(f.run(&config, &[]));
+    assert_eq!(
+        fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+        "updated"
+    );
+}
+
+#[test]
+fn copied_git_skills_exclude_repository_metadata_and_converge() {
+    let f = Fixture::new();
+    let origin = f.repo("origin");
+    f.skill("origin", "skill content");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "fixture"]));
+    let config = f.write("config.toml", "[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\nlink=false\n[bundles.one.skills.remote]\nrepo='./origin'\nref='main'\n[bundles.one.skills.local]\nsource='./origin'\n");
+    success(f.run(&config, &[]));
+    for name in ["remote", "local"] {
+        assert!(!f.path(&format!("target/{name}/.git")).exists());
+    }
+    let paths = [
+        f.path("target/remote"),
+        f.path("target/local"),
+        f.path("target/remote/SKILL.md"),
+        f.path("target/local/SKILL.md"),
+        f.path("cache/uniskill/state.toml"),
+    ];
+    let before = paths.each_ref().map(|path| snapshot(path));
+    success(f.run(&config, &[]));
+    assert_eq!(paths.each_ref().map(|path| snapshot(path)), before);
+}
+
+#[test]
 fn competing_skill_routes_fail_without_replacing_the_installed_link() {
     let f = Fixture::new();
     f.skill("source", "one");
