@@ -8,6 +8,8 @@ pub struct Layout {
     root: PathBuf,
     bundles: PathBuf,
     directories: BTreeSet<PathBuf>,
+    reserved_directories: BTreeSet<PathBuf>,
+    entries: BTreeSet<PathBuf>,
     aliases: BTreeSet<PathBuf>,
 }
 
@@ -19,16 +21,38 @@ impl Layout {
         aliases.extend(bundles.aliases);
         Ok(Self {
             directories: BTreeSet::from([root.path.clone(), bundles.path.clone()]),
+            reserved_directories: BTreeSet::new(),
+            entries: BTreeSet::new(),
             root: root.path,
             bundles: bundles.path,
             aliases,
         })
     }
 
-    pub fn reserve_directory(&mut self, path: &Path) -> Result<()> {
+    pub fn reserve_directory(&mut self, path: &Path) -> Result<PathBuf> {
         let directory = crate::config::directory_path(path)?;
-        self.directories.insert(directory.path);
+        self.directories.insert(directory.path.clone());
         self.aliases.extend(directory.aliases);
+        Ok(directory.path)
+    }
+
+    pub fn reserve(&mut self, reservations: &crate::config::Reservations) -> Result<()> {
+        for directory in &reservations.directories {
+            let path = self.reserve_directory(directory)?;
+            self.reserved_directories.insert(path);
+        }
+        for entry in &reservations.entries {
+            let parent = crate::config::directory_path(
+                entry
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("reserved entry requires a parent"))?,
+            )?;
+            let name = entry
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("reserved entry requires a file name"))?;
+            self.entries.insert(parent.path.join(name));
+            self.aliases.extend(parent.aliases);
+        }
         Ok(())
     }
 
@@ -50,12 +74,20 @@ impl Layout {
     pub fn conflicts(&self, entry: &Path) -> bool {
         self.directories
             .iter()
+            .chain(self.entries.iter())
             .chain(self.aliases.iter())
             .any(|root| entry.starts_with(root) || root.starts_with(entry))
     }
 
-    pub fn protects_alias(&self, entry: &Path) -> bool {
-        self.aliases.iter().any(|alias| alias.starts_with(entry))
+    pub fn invalidates_storage(&self, entry: &Path) -> bool {
+        self.aliases
+            .iter()
+            .chain(self.entries.iter())
+            .any(|root| root.starts_with(entry))
+            || self
+                .reserved_directories
+                .iter()
+                .any(|root| root.starts_with(entry) || entry.starts_with(root))
     }
 }
 
@@ -67,9 +99,14 @@ pub struct BundlePaths {
 }
 
 impl BundlePaths {
-    pub fn overlaps(&self, entry: &Path) -> bool {
+    pub fn roots(&self) -> impl Iterator<Item = &Path> {
         [&self.published, &self.staging, &self.previous]
             .into_iter()
+            .map(PathBuf::as_path)
+    }
+
+    pub fn overlaps(&self, entry: &Path) -> bool {
+        self.roots()
             .any(|root| entry.starts_with(root) || root.starts_with(entry))
     }
 }

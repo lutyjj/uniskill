@@ -442,6 +442,13 @@ pub(crate) struct DirectoryPath {
     pub aliases: std::collections::BTreeSet<PathBuf>,
 }
 
+/// Filesystem resources another reconciler needs to keep reachable.
+#[derive(Debug, Default)]
+pub(crate) struct Reservations {
+    pub directories: Vec<PathBuf>,
+    pub entries: Vec<PathBuf>,
+}
+
 pub(crate) fn directory_path(path: &Path) -> anyhow::Result<DirectoryPath> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()

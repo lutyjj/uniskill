@@ -282,6 +282,20 @@ depending on source-fetching code.
 check recorded entries against those paths before recovery or assembly can remove
 anything. Conflicting bundles wait while failed owners retain their links; removing
 the former owner lets ordinary pruning retire the claim before the next apply.
+Worktree recovery checks main ownership too, under the shared cache lock, because
+it mutates the same bundle storage. Pruning uses only the caller's manifest.
+Live sources must sit outside mutable cache storage; use `link = false` to copy
+a cache entry. This prevents publication from removing a directory that its new
+live links depend on.
+
+MCP reports its storage directories and declared native file paths as filesystem
+reservations. CLI orchestration passes those reservations to skill planning,
+including shared MCP storage during worktree sync. The layout protects native
+files and the aliases used to reach them, while allowing skills beside those
+files. Each reconciler owns its paths; `config::Reservations` contains no
+harness or source variants.
+Cache lifecycle mutation checks those reservations too, so publication, recovery,
+and staging cannot remove MCP files or storage placed inside a bundle directory.
 
 Applied artifacts and ownership manifests remain unchanged on a converged
 sync. Temporary staging and mutable remote Git metadata can change during

@@ -110,20 +110,19 @@ fn root_paths(entry: &Path) -> Result<BTreeSet<PathBuf>> {
     Ok(roots)
 }
 
-fn begin(
-    cache: &Path,
+struct SyncInputs {
+    _lock: std::fs::File,
+    cache: PathBuf,
+    previous: state::Manifest,
+    cache_claims: Vec<state::ManagedLink>,
+    layout: crate::cache::Layout,
+}
+
+fn load_ownership(
     state_dir: &Path,
     worktree: Option<&worktree::WorktreeContext>,
-) -> Result<(
-    std::fs::File,
-    PathBuf,
-    state::Manifest,
-    crate::cache::Layout,
-)> {
-    let lock = state::lock(cache)?;
-    let mut layout = crate::cache::Layout::resolve(cache)?;
-    layout.reserve_directory(state_dir)?;
-    let cache = cache.canonicalize()?;
+    layout: &crate::cache::Layout,
+) -> Result<state::Manifest> {
     if let Some(ctx) = worktree {
         ctx.destination(&state_dir.join("state.toml"))?;
     }
@@ -134,15 +133,40 @@ fn begin(
             Some(ctx) => ctx.destination(declared)?,
             None => config::destination_path(declared)?,
         };
-        if layout.protects_alias(&path) {
+        if layout.invalidates_storage(&path) {
             bail!(
-                "skill ownership overlaps a cache storage alias: {}",
+                "skill ownership overlaps a reserved filesystem entry: {}",
                 path.display()
             );
         }
         owner.path = path.to_string_lossy().into_owned();
     }
-    Ok((lock, cache, previous, layout))
+    Ok(previous)
+}
+
+fn begin(
+    cache: &Path,
+    state_dir: &Path,
+    worktree: Option<&worktree::WorktreeContext>,
+    reservations: &config::Reservations,
+) -> Result<SyncInputs> {
+    let lock = state::lock(cache)?;
+    let mut layout = crate::cache::Layout::resolve(cache)?;
+    layout.reserve_directory(state_dir)?;
+    layout.reserve(reservations)?;
+    let cache = cache.canonicalize()?;
+    let previous = load_ownership(state_dir, worktree, &layout)?;
+    let mut cache_claims = previous.links.clone();
+    if worktree.is_some() {
+        cache_claims.extend(load_ownership(&cache, None, &layout)?.links);
+    }
+    Ok(SyncInputs {
+        _lock: lock,
+        cache,
+        previous,
+        cache_claims,
+        layout,
+    })
 }
 
 fn bundle_failure(
@@ -163,11 +187,16 @@ fn bundle_failure(
 fn bundle_paths(
     layout: &crate::cache::Layout,
     name: &str,
-    previous: &state::Manifest,
+    claims: &[state::ManagedLink],
 ) -> Result<crate::cache::BundlePaths> {
     let paths = layout.bundle(name)?;
-    if let Some(owner) = previous
-        .links
+    if let Some(root) = paths.roots().find(|root| layout.invalidates_storage(root)) {
+        bail!(
+            "bundle cache lifecycle overlaps reserved filesystem resources at {}",
+            root.display()
+        );
+    }
+    if let Some(owner) = claims
         .iter()
         .find(|owner| paths.overlaps(Path::new(&owner.path)))
     {
@@ -236,6 +265,7 @@ fn plan_bundle(
     skills: &Path,
     published: &Path,
     destinations: &[Destination],
+    layout: &crate::cache::Layout,
     worktree: Option<&worktree::WorktreeContext>,
 ) -> Result<()> {
     let mut planned = Vec::new();
@@ -270,7 +300,12 @@ fn plan_bundle(
             let directory = entry.path().canonicalize()?;
             roots.insert(match directory.strip_prefix(skills) {
                 Ok(relative) => published.join("skills").join(relative),
-                Err(_) => directory,
+                Err(_) => {
+                    if layout.owns(&directory)? {
+                        bail!("live skill source lies inside mutable cache storage; use link = false to copy it");
+                    }
+                    directory
+                },
             });
             planned.push((
                 path,
@@ -437,7 +472,15 @@ pub fn sync_with_registry(
     for bundle in bundles.values_mut() {
         config::anchor_bundle_paths(bundle, source_base_dir);
     }
-    sync_with_progress(&bundles, registry, cache_dir, state_dir, 4, &mut |_| {})
+    sync_with_progress(
+        &bundles,
+        registry,
+        cache_dir,
+        state_dir,
+        &config::Reservations::default(),
+        4,
+        &mut |_| {},
+    )
 }
 
 pub fn sync_with_progress(
@@ -445,10 +488,17 @@ pub fn sync_with_progress(
     registry: &HashMap<String, harnesses::HarnessDef>,
     cache_dir: &Path,
     state_dir: &Path,
+    reservations: &config::Reservations,
     jobs: usize,
     progress: &mut impl FnMut(fetch_plan::Progress),
 ) -> SyncReport {
-    let (_lock, cache, previous, layout) = match begin(cache_dir, state_dir, None) {
+    let SyncInputs {
+        _lock,
+        cache,
+        previous,
+        cache_claims,
+        layout,
+    } = match begin(cache_dir, state_dir, None, reservations) {
         Ok(inputs) => inputs,
         Err(error) => return state_failure(error),
     };
@@ -457,7 +507,7 @@ pub fn sync_with_progress(
     let mut eligible = HashMap::new();
     let mut targets = BTreeMap::new();
     for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
-        let checked = bundle_paths(&layout, name, &previous)
+        let checked = bundle_paths(&layout, name, &cache_claims)
             .and_then(|root| fetcher::recover_bundle_cache(&root))
             .and_then(|_| destinations(bundle, registry, None));
         match checked {
@@ -483,6 +533,7 @@ pub fn sync_with_progress(
                     &bundle.paths.staging.join("skills"),
                     &bundle.paths.published,
                     &destinations,
+                    &layout,
                     None,
                 )?;
                 Ok(bundle)
@@ -533,8 +584,15 @@ pub fn sync_worktree(
     cache_dir: &Path,
     state_dir: &Path,
     ctx: &worktree::WorktreeContext,
+    reservations: &config::Reservations,
 ) -> SyncReport {
-    let (_lock, cache, previous, layout) = match begin(cache_dir, state_dir, Some(ctx)) {
+    let SyncInputs {
+        _lock,
+        cache,
+        previous,
+        cache_claims,
+        layout,
+    } = match begin(cache_dir, state_dir, Some(ctx), reservations) {
         Ok(inputs) => inputs,
         Err(error) => return state_failure(error),
     };
@@ -546,7 +604,7 @@ pub fn sync_worktree(
             if destinations.is_empty() {
                 return Ok(());
             }
-            let paths = bundle_paths(&layout, name, &previous)?;
+            let paths = bundle_paths(&layout, name, &cache_claims)?;
             fetcher::recover_bundle_cache(&paths)?;
             plan_bundle(
                 &mut routes,
@@ -554,6 +612,7 @@ pub fn sync_worktree(
                 &paths.published.join("skills"),
                 &paths.published,
                 &destinations,
+                &layout,
                 Some(ctx),
             )
         });
@@ -706,23 +765,31 @@ mod tests {
             },
         )]);
         let interrupted = std::panic::catch_unwind(|| {
-            sync_with_progress(&bundles, &registry, &cache, &cache, 1, &mut |event| {
-                if matches!(event, fetch_plan::Progress::Linking { .. }) {
-                    let owned = state::Manifest::load(&cache).unwrap();
-                    assert_eq!(owned.links.len(), 1);
-                    assert_eq!(owned.links[0].path, target.to_string_lossy());
-                    assert!(!target.exists());
-                    assert_eq!(
-                        linker::ensure_skill_symlink(
-                            &cache.join("bundles/fixture/skills/demo"),
-                            &target
-                        )
-                        .status,
-                        linker::SyncStatus::Created
-                    );
-                    panic!("fixture interruption after one link");
-                }
-            })
+            sync_with_progress(
+                &bundles,
+                &registry,
+                &cache,
+                &cache,
+                &config::Reservations::default(),
+                1,
+                &mut |event| {
+                    if matches!(event, fetch_plan::Progress::Linking { .. }) {
+                        let owned = state::Manifest::load(&cache).unwrap();
+                        assert_eq!(owned.links.len(), 1);
+                        assert_eq!(owned.links[0].path, target.to_string_lossy());
+                        assert!(!target.exists());
+                        assert_eq!(
+                            linker::ensure_skill_symlink(
+                                &cache.join("bundles/fixture/skills/demo"),
+                                &target
+                            )
+                            .status,
+                            linker::SyncStatus::Created
+                        );
+                        panic!("fixture interruption after one link");
+                    }
+                },
+            )
         });
         assert!(interrupted.is_err());
         assert!(target.is_symlink());
@@ -765,11 +832,16 @@ mod tests {
                 .summary
                 .has_failures()
         );
-        assert!(
-            !sync_worktree(&bundles, &registry, &cache, &state_dir, &ctx)
-                .summary
-                .has_failures()
-        );
+        assert!(!sync_worktree(
+            &bundles,
+            &registry,
+            &cache,
+            &state_dir,
+            &ctx,
+            &config::Reservations::default()
+        )
+        .summary
+        .has_failures());
         let manifest = fs::read(state_dir.join("state.toml")).unwrap();
         let lock = state::lock(&cache).unwrap();
         let published = cache.join("bundles/local");
@@ -781,7 +853,14 @@ mod tests {
             scope.spawn(|| {
                 started.send(()).unwrap();
                 finished
-                    .send(sync_worktree(&bundles, &registry, &cache, &state_dir, &ctx))
+                    .send(sync_worktree(
+                        &bundles,
+                        &registry,
+                        &cache,
+                        &state_dir,
+                        &ctx,
+                        &config::Reservations::default(),
+                    ))
                     .unwrap();
             });
             ready.recv_timeout(Duration::from_secs(5)).unwrap();

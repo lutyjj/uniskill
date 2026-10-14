@@ -145,7 +145,7 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
     let state_dir = ctx.worktree_root.join(".uniskill-cache");
     ctx.destination(&state_dir.join("state.toml"))?;
 
-    let mcp_report = if options.check {
+    let mut mcp_report = if options.check {
         mcp::check(
             &inputs.mcp,
             &inputs.registry,
@@ -170,12 +170,18 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
         return Ok(());
     }
 
+    mcp_report
+        .reservations
+        .directories
+        .push(mcp::storage_directory(&inputs.cache_dir));
+
     let report = sync::sync_worktree(
         &inputs.bundles,
         &inputs.registry,
         &inputs.cache_dir,
         &state_dir,
         &ctx,
+        &mcp_report.reservations,
     );
     print_report(&report);
 
@@ -298,6 +304,7 @@ fn run_sync(
         registry,
         cache_dir,
         cache_dir,
+        &mcp_report.reservations,
         options.jobs,
         &mut print_fetch_progress,
     );

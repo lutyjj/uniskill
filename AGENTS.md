@@ -34,9 +34,9 @@ Modules own narrow jobs:
 
 | Module | Job |
 | --- | --- |
-| `cli.rs` | CLI parsing, config discovery, report printing, exit codes |
-| `config.rs` | TOML shapes, source validation, env var and path resolution |
-| `cache.rs` | Storage identity, alias reservations, and bundle lifecycle paths |
+| `cli.rs` | CLI parsing, config discovery, sync orchestration, reporting, exit codes |
+| `config.rs` | TOML shapes, source validation, path resolution, filesystem reservation data |
+| `cache.rs` | Storage identity, filesystem reservations, and bundle lifecycle paths |
 | `fetcher.rs` | Materializing local, URL, and git sources into the bundle cache |
 | `harnesses.rs` | Registry loading and configurable skill/MCP destinations |
 | `fetch_plan.rs` | Deduplicated, bounded remote downloads and progress |

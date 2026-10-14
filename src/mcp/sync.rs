@@ -25,6 +25,12 @@ pub struct Report {
     pub events: Vec<Event>,
     pub changed: bool,
     pub preserved: Vec<PathBuf>,
+    pub reservations: config::Reservations,
+}
+
+struct Desired {
+    entries: BTreeMap<Identity, (Format, Value)>,
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -67,17 +73,18 @@ pub fn check(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
+    let storage = storage_directory(state_dir);
     let state_dir = state_directory(state_dir, worktree)?;
     if transaction::pending(&state_dir) {
         bail!("interrupted MCP transaction; run sync to recover before checking");
     }
-    Ok(plan(
-        desired_entries(servers, registry, worktree)?,
-        &state_dir,
-        worktree,
-        adopt,
-    )?
-    .report)
+    let desired = desired_entries(servers, registry, worktree)?;
+    let mut report = plan(desired.entries, &state_dir, worktree, adopt)?.report;
+    report.reservations = config::Reservations {
+        directories: vec![storage],
+        entries: desired.paths,
+    };
+    Ok(report)
 }
 
 pub fn sync(
@@ -87,14 +94,16 @@ pub fn sync(
     worktree: Option<&WorktreeContext>,
     adopt: bool,
 ) -> Result<Report> {
+    let storage = storage_directory(state_dir);
     let state_dir = state_directory(state_dir, worktree)?;
     let desired = desired_entries(servers, registry, worktree)?;
-    if desired.is_empty() && !state_dir.exists() {
+    if desired.entries.is_empty() && !state_dir.exists() {
         return Ok(Report::default());
     }
     let _lock = transaction::lock(&state_dir)?;
     let previous = load_state(&state_dir)?;
     let mut paths: BTreeSet<PathBuf> = desired
+        .entries
         .keys()
         .chain(previous.owned.keys())
         .map(|identity| identity.path.clone())
@@ -118,14 +127,22 @@ pub fn sync(
     }
     let _destinations = transaction::lock_destinations(&paths)?;
     let preserved = transaction::recover(&state_dir)?;
-    let mut plan = plan(desired, &state_dir, worktree, adopt)?;
+    let mut plan = plan(desired.entries, &state_dir, worktree, adopt)?;
     transaction::commit(&state_dir, plan.updates)?;
     plan.report.preserved = preserved;
+    plan.report.reservations = config::Reservations {
+        directories: vec![storage],
+        entries: desired.paths,
+    };
     Ok(plan.report)
 }
 
+pub fn storage_directory(base: &Path) -> PathBuf {
+    base.join("mcp")
+}
+
 fn state_directory(base: &Path, worktree: Option<&WorktreeContext>) -> Result<PathBuf> {
-    let file = base.join("mcp/state.json");
+    let file = storage_directory(base).join("state.json");
     let file = match worktree {
         Some(ctx) => ctx.destination(&file)?,
         None => config::destination_path(&file)?,
@@ -157,8 +174,9 @@ fn desired_entries(
     servers: &BTreeMap<String, Server>,
     registry: &HashMap<String, HarnessDef>,
     worktree: Option<&WorktreeContext>,
-) -> Result<BTreeMap<Identity, (Format, Value)>> {
+) -> Result<Desired> {
     let mut desired = BTreeMap::<Identity, (Format, Value)>::new();
+    let mut paths = Vec::new();
     for (name, server) in servers {
         if !super::model::valid_name(name) {
             bail!("invalid MCP server identity");
@@ -173,10 +191,15 @@ fn desired_entries(
             let target = harness.mcp.as_ref().ok_or_else(|| {
                 anyhow!("MCP server {name}: harness {harness_name} has no MCP target")
             })?;
-            let path = config::destination_path(Path::new(&target.path))?;
+            let declared = Path::new(&target.path);
+            let path = config::destination_path(declared)?;
+            paths.push(declared.to_path_buf());
             let path = match worktree {
                 Some(ctx) => match ctx.retarget(&path.to_string_lossy()) {
-                    Some(path) => ctx.destination(Path::new(&path))?,
+                    Some(path) => {
+                        paths.push(PathBuf::from(&path));
+                        ctx.destination(Path::new(&path))?
+                    }
                     None => continue,
                 },
                 None => path,
@@ -198,7 +221,10 @@ fn desired_entries(
             }
         }
     }
-    Ok(desired)
+    Ok(Desired {
+        entries: desired,
+        paths,
+    })
 }
 
 fn load_state(state_dir: &Path) -> Result<LoadedState> {
