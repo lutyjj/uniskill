@@ -51,7 +51,12 @@ HTTP `type` marker; omitting populated connection fields is rejected.
 as `${VAR}`. `references = "fields"` keeps explicit reference fields; literal
 values containing `${` are rejected for these targets. A harness can declare
 skills, MCP, or both. Unknown destinations and conflicting routes fail before
-native writes.
+native writes. Explicit custom targets remain reserved even when no server uses
+them. Unused built-in targets require no environment variables and reserve no
+paths. Native targets must stay outside uniskill's skill cache and ownership
+storage, including paths reached through aliases inside those namespaces.
+Conflicting targets in ownership or recovery state also fail before native
+writes or recovery.
 
 Global and project configs share this model. `includes = ["private.toml"]`
 composes additional files; paths resolve at the file declaring them. Includes
@@ -78,7 +83,13 @@ Unrelated entries, agent settings, and TOML comments stay intact. Converged
 files and ownership state retain their bytes and modification times.
 
 Ownership lives in `mcp/state.json` under the sync's cache directory. It records
-identities and hashes, without server payloads. New native files are mode 0600;
+identities and hashes, without server payloads. Version 2 also tracks native file
+paths independently of owned server entries. Removing the last server keeps the
+file and its directory aliases protected while the file exists; this tracking
+does not grant ownership of any entry. Deleting a retired file releases its
+tracking on the next sync without recreating its directory. Sync reads version 1
+state and upgrades it to version 2 on apply; older binaries cannot read version 2.
+Back up ownership state before a binary downgrade. New native files are mode 0600;
 existing modes are preserved. Native symlinks, malformed files, and incompatible
 table shapes are rejected. Native files and individual outputs are limited to
 8 MiB; the transaction journal is limited to 64 MiB.
@@ -88,7 +99,7 @@ mode-0600 journal records before/after contents; atomic file replacement and
 fsync protect each write. Persistent mode-0600 `.uniskill-mcp-<digest>.lock`
 sidecars beside native files coordinate writers across config and cache scopes.
 Destination locks cover desired entries, current ownership, journal native
-updates, and ownership entries that recovery can restore. They are acquired
+updates, tracked files, and both ownership images recorded by recovery. They are acquired
 in path order before recovery and planning. Ownership manifests remain scoped
 to their caches. A failed or
 interrupted apply rolls back its own bytes; a later sync recovers the journal.

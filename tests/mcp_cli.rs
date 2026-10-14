@@ -841,3 +841,98 @@ fn invalid_restored_ownership_preserves_the_journal_and_current_state() {
         journal
     );
 }
+
+#[test]
+fn retired_native_files_remain_tracked_until_deleted_without_granting_entry_ownership() {
+    let f = Fixture::new(JSON_TARGET);
+    f.write("native.json", br#"{"userSetting":true}"#);
+    succeeded(f.run(&["--mcp-only"]));
+    let state = f.path("cache/uniskill/mcp/state.json");
+    // Exercise automatic v1 loading through the production migration path.
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    legacy["version"] = json!(1);
+    legacy.as_object_mut().unwrap().remove("files");
+    fs::write(&state, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let before_native = fs::read(f.path("native.json")).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    assert_eq!(fs::read(f.path("native.json")).unwrap(), before_native);
+    fs::write(&f.config, "").unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    let retired = f.json("cache/uniskill/mcp/state.json");
+    assert_eq!(retired["version"], 2);
+    assert_eq!(retired["entries"], json!([]));
+    assert_eq!(retired["files"], json!([f.path("native.json")]));
+    assert_eq!(f.json("native.json")["userSetting"], true);
+    let before = (
+        fs::read(&state).unwrap(),
+        fs::metadata(&state).unwrap().modified().unwrap(),
+        fs::read(f.path("native.json")).unwrap(),
+    );
+    succeeded(f.run(&["--mcp-only"]));
+    succeeded(f.run(&["--check-mcp"]));
+    assert_eq!(
+        (
+            fs::read(&state).unwrap(),
+            fs::metadata(&state).unwrap().modified().unwrap(),
+            fs::read(f.path("native.json")).unwrap()
+        ),
+        before
+    );
+    f.write("native.json", br#"{"userSetting":true,"tools":{"servers":{"docs":{"url":"https://example.com/mcp","type":"http"}}}}"#);
+    fs::write(&f.config, JSON_TARGET).unwrap();
+    assert!(!f.run(&["--mcp-only"]).status.success());
+    fs::write(&f.config, "").unwrap();
+    fs::remove_file(f.path("native.json")).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    assert_eq!(f.json("cache/uniskill/mcp/state.json")["files"], json!([]));
+    assert!(!f.path("native.json").exists());
+}
+
+#[test]
+fn deleting_a_retired_native_directory_does_not_recreate_it_for_locking() {
+    let f = Fixture::new(&JSON_TARGET.replace("native.json", "native/config.json"));
+    succeeded(f.run(&["--mcp-only"]));
+    fs::write(&f.config, "").unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    fs::remove_file(f.path("native/config.json")).unwrap();
+    for entry in fs::read_dir(f.path("native")).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    fs::remove_dir(f.path("native")).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    assert!(!f.path("native").exists());
+    assert_eq!(f.json("cache/uniskill/mcp/state.json")["files"], json!([]));
+}
+
+#[test]
+fn recovery_preserved_native_files_are_tracked_without_prior_entry_ownership() {
+    let f = Fixture::new("");
+    let native = f.path("native.json");
+    f.write("native.json", br#"{"externalSetting":true}"#);
+    f.write(
+        "cache/uniskill/mcp/journal.json",
+        &serde_json::to_vec(&json!({
+            "version":1,"updates":[{"path":native,"before":null,"after":"{}","mode":384}]
+        }))
+        .unwrap(),
+    );
+    let before_native = fs::read(&native).unwrap();
+    succeeded(f.run(&["--mcp-only"]));
+    assert_eq!(fs::read(&native).unwrap(), before_native);
+    let state = f.json("cache/uniskill/mcp/state.json");
+    assert_eq!(state["entries"], json!([]));
+    assert_eq!(state["files"], json!([native]));
+    let path = f.path("cache/uniskill/mcp/state.json");
+    let before = (
+        fs::read(&path).unwrap(),
+        fs::metadata(&path).unwrap().modified().unwrap(),
+    );
+    succeeded(f.run(&["--mcp-only"]));
+    assert_eq!(
+        (
+            fs::read(&path).unwrap(),
+            fs::metadata(&path).unwrap().modified().unwrap()
+        ),
+        before
+    );
+}

@@ -145,6 +145,11 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
     let state_dir = ctx.worktree_root.join(".uniskill-cache");
     ctx.destination(&state_dir.join("state.toml"))?;
 
+    let storage = crate::cache::storage(&inputs.cache_dir, &state_dir)?;
+    let shared_mcp = mcp::reservations(&inputs.cache_dir)?;
+    for path in &shared_mcp.entries {
+        storage.validate_write(path)?;
+    }
     let mut mcp_report = if options.check {
         mcp::check(
             &inputs.mcp,
@@ -152,6 +157,7 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
             &state_dir,
             Some(&ctx),
             options.adopt,
+            &storage,
         )?
     } else {
         mcp::sync(
@@ -160,6 +166,7 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
             &state_dir,
             Some(&ctx),
             options.adopt,
+            &storage,
         )?
     };
     print_mcp_report(&mcp_report);
@@ -173,7 +180,8 @@ fn sync_current_worktree(explicit_config: Option<&Path>, options: SyncOptions) -
     mcp_report
         .reservations
         .directories
-        .push(mcp::storage_directory(&inputs.cache_dir));
+        .extend(shared_mcp.directories);
+    mcp_report.reservations.entries.extend(shared_mcp.entries);
 
     let report = sync::sync_worktree(
         &inputs.bundles,
@@ -286,10 +294,25 @@ fn run_sync(
     cache_dir: &Path,
     options: SyncOptions,
 ) -> Result<()> {
+    let storage = crate::cache::storage(cache_dir, cache_dir)?;
     let mcp_report = if options.check {
-        mcp::check(&config.mcp, registry, cache_dir, None, options.adopt)?
+        mcp::check(
+            &config.mcp,
+            registry,
+            cache_dir,
+            None,
+            options.adopt,
+            &storage,
+        )?
     } else {
-        mcp::sync(&config.mcp, registry, cache_dir, None, options.adopt)?
+        mcp::sync(
+            &config.mcp,
+            registry,
+            cache_dir,
+            None,
+            options.adopt,
+            &storage,
+        )?
     };
     print_mcp_report(&mcp_report);
     if options.check {

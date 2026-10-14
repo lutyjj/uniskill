@@ -4,4 +4,4 @@ mod sync;
 mod transaction;
 
 pub use model::{Format, Server, Target};
-pub use sync::{check, storage_directory, sync, Report};
+pub use sync::{check, reservations, sync, Report};

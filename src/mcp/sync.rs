@@ -11,7 +11,7 @@ use super::{
     transaction::{self, Update},
     Format, Server,
 };
-use crate::{config, harnesses::HarnessDef, worktree::WorktreeContext};
+use crate::{harnesses::HarnessDef, worktree::WorktreeContext};
 
 #[derive(Debug, Clone)]
 pub struct Event {
@@ -25,12 +25,13 @@ pub struct Report {
     pub events: Vec<Event>,
     pub changed: bool,
     pub preserved: Vec<PathBuf>,
-    pub reservations: config::Reservations,
+    pub reservations: crate::filesystem::Reservations,
 }
 
 struct Desired {
     entries: BTreeMap<Identity, (Format, Value)>,
     paths: Vec<PathBuf>,
+    files: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -54,6 +55,8 @@ struct Owned {
 struct State {
     version: u32,
     entries: Vec<Owned>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files: Option<BTreeSet<PathBuf>>,
 }
 
 struct Plan {
@@ -64,6 +67,7 @@ struct Plan {
 struct LoadedState {
     bytes: Option<Vec<u8>>,
     owned: BTreeMap<Identity, Owned>,
+    files: BTreeSet<PathBuf>,
 }
 
 pub fn check(
@@ -72,18 +76,18 @@ pub fn check(
     state_dir: &Path,
     worktree: Option<&WorktreeContext>,
     adopt: bool,
+    storage: &crate::filesystem::Protection,
 ) -> Result<Report> {
-    let storage = storage_directory(state_dir);
+    let mut resources = reservations(state_dir)?;
     let state_dir = state_directory(state_dir, worktree)?;
     if transaction::pending(&state_dir) {
         bail!("interrupted MCP transaction; run sync to recover before checking");
     }
     let desired = desired_entries(servers, registry, worktree)?;
-    let mut report = plan(desired.entries, &state_dir, worktree, adopt)?.report;
-    report.reservations = config::Reservations {
-        directories: vec![storage],
-        entries: desired.paths,
-    };
+    resources.entries.extend(desired.paths);
+    validate_resources(&resources, storage)?;
+    let mut report = plan(desired.entries, desired.files, &state_dir, worktree, adopt)?.report;
+    report.reservations = resources;
     Ok(report)
 }
 
@@ -93,47 +97,45 @@ pub fn sync(
     state_dir: &Path,
     worktree: Option<&WorktreeContext>,
     adopt: bool,
+    storage: &crate::filesystem::Protection,
 ) -> Result<Report> {
-    let storage = storage_directory(state_dir);
+    let declared_storage = state_dir;
     let state_dir = state_directory(state_dir, worktree)?;
     let desired = desired_entries(servers, registry, worktree)?;
+    let mut resources = crate::filesystem::Reservations {
+        directories: vec![storage_directory(declared_storage)],
+        entries: desired.paths,
+    };
+    validate_resources(&resources, storage)?;
     if desired.entries.is_empty() && !state_dir.exists() {
-        return Ok(Report::default());
+        return Ok(Report {
+            reservations: resources,
+            ..Report::default()
+        });
     }
     let _lock = transaction::lock(&state_dir)?;
     let previous = load_state(&state_dir)?;
-    let mut paths: BTreeSet<PathBuf> = desired
-        .entries
-        .keys()
-        .chain(previous.owned.keys())
-        .map(|identity| identity.path.clone())
-        .collect();
-    for update in transaction::journal_updates(&state_dir)? {
-        let path = config::destination_path(&update.path)?;
-        if path == state_dir.join("state.json") {
-            paths.extend(
-                decode_owned(update.before.as_deref().map(str::as_bytes))?
-                    .into_keys()
-                    .map(|identity| identity.path),
-            );
-        } else {
-            paths.insert(path);
-        }
-    }
+    let mut paths = desired.files;
+    paths.extend(previous.files);
+    paths.extend(previous.owned.keys().map(|identity| identity.path.clone()));
+    paths.extend(recovery_paths(&state_dir)?);
+    resources.entries.extend(paths.iter().cloned());
+    validate_resources(&resources, storage)?;
     if let Some(ctx) = worktree {
         for path in &paths {
             ctx.destination(path)?;
         }
     }
-    let _destinations = transaction::lock_destinations(&paths)?;
+    let physical = paths
+        .iter()
+        .map(|path| crate::filesystem::destination_path(path))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let _destinations = transaction::lock_destinations(&physical)?;
     let preserved = transaction::recover(&state_dir)?;
-    let mut plan = plan(desired.entries, &state_dir, worktree, adopt)?;
+    let mut plan = plan(desired.entries, paths, &state_dir, worktree, adopt)?;
     transaction::commit(&state_dir, plan.updates)?;
     plan.report.preserved = preserved;
-    plan.report.reservations = config::Reservations {
-        directories: vec![storage],
-        entries: desired.paths,
-    };
+    plan.report.reservations = resources;
     Ok(plan.report)
 }
 
@@ -141,11 +143,60 @@ pub fn storage_directory(base: &Path) -> PathBuf {
     base.join("mcp")
 }
 
+/// Read dependencies shared with another scope without reconciling its servers.
+pub fn reservations(base: &Path) -> Result<crate::filesystem::Reservations> {
+    let state_dir = state_directory(base, None)?;
+    let previous = load_state(&state_dir)?;
+    let mut paths = previous.files;
+    paths.extend(previous.owned.into_keys().map(|identity| identity.path));
+    paths.extend(recovery_paths(&state_dir)?);
+    Ok(crate::filesystem::Reservations {
+        directories: vec![storage_directory(base)],
+        entries: paths.into_iter().collect(),
+    })
+}
+
+fn recovery_paths(state_dir: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut paths = BTreeSet::new();
+    for update in transaction::journal_updates(state_dir)? {
+        let path = crate::filesystem::destination_path(&update.path)?;
+        if path == state_dir.join("state.json") {
+            for bytes in [
+                update.before.as_deref().map(str::as_bytes),
+                Some(update.after.as_bytes()),
+            ] {
+                let (owned, files) = decode_state(bytes)?;
+                paths.extend(files);
+                paths.extend(owned.into_keys().map(|identity| identity.path));
+            }
+        } else {
+            paths.insert(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn validate_resources(
+    resources: &crate::filesystem::Reservations,
+    storage: &crate::filesystem::Protection,
+) -> Result<()> {
+    let mut own = crate::filesystem::Protection::default();
+    own.reserve(&crate::filesystem::Reservations {
+        directories: resources.directories.clone(),
+        entries: Vec::new(),
+    })?;
+    for path in &resources.entries {
+        storage.validate_write(path)?;
+        own.validate_write(path)?;
+    }
+    Ok(())
+}
+
 fn state_directory(base: &Path, worktree: Option<&WorktreeContext>) -> Result<PathBuf> {
     let file = storage_directory(base).join("state.json");
     let file = match worktree {
         Some(ctx) => ctx.destination(&file)?,
-        None => config::destination_path(&file)?,
+        None => crate::filesystem::destination_path(&file)?,
     };
     Ok(file.parent().expect("state file has parent").to_path_buf())
 }
@@ -177,6 +228,18 @@ fn desired_entries(
 ) -> Result<Desired> {
     let mut desired = BTreeMap::<Identity, (Format, Value)>::new();
     let mut paths = Vec::new();
+    let mut files = BTreeSet::new();
+    for harness in registry.values() {
+        if let Some(target) = &harness.mcp {
+            paths.push(PathBuf::from(&target.path));
+            let physical = crate::filesystem::destination_path(Path::new(&target.path))?;
+            if let Some(ctx) = worktree {
+                if let Some(path) = ctx.retarget(&physical.to_string_lossy()) {
+                    paths.push(PathBuf::from(&path));
+                }
+            }
+        }
+    }
     for (name, server) in servers {
         if !super::model::valid_name(name) {
             bail!("invalid MCP server identity");
@@ -192,17 +255,21 @@ fn desired_entries(
                 anyhow!("MCP server {name}: harness {harness_name} has no MCP target")
             })?;
             let declared = Path::new(&target.path);
-            let path = config::destination_path(declared)?;
+            let path = crate::filesystem::destination_path(declared)?;
             paths.push(declared.to_path_buf());
             let path = match worktree {
                 Some(ctx) => match ctx.retarget(&path.to_string_lossy()) {
                     Some(path) => {
+                        files.insert(PathBuf::from(&path));
                         paths.push(PathBuf::from(&path));
                         ctx.destination(Path::new(&path))?
                     }
                     None => continue,
                 },
-                None => path,
+                None => {
+                    files.insert(declared.to_path_buf());
+                    path
+                }
             };
             let identity = Identity {
                 path,
@@ -221,31 +288,67 @@ fn desired_entries(
             }
         }
     }
+    paths.sort();
+    paths.dedup();
     Ok(Desired {
         entries: desired,
         paths,
+        files,
     })
 }
 
 fn load_state(state_dir: &Path) -> Result<LoadedState> {
     let bytes = transaction::read(&state_dir.join("state.json"))?;
-    let owned = decode_owned(bytes.as_deref())?;
-    Ok(LoadedState { bytes, owned })
+    let (owned, files) = decode_state(bytes.as_deref())?;
+    let active: BTreeSet<_> = owned.keys().map(|identity| &identity.path).collect();
+    let mut retained = BTreeSet::new();
+    for file in files {
+        match std::fs::symlink_metadata(&file) {
+            Ok(_) => {
+                retained.insert(file);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if active.contains(&crate::filesystem::destination_path(&file)?) {
+                    retained.insert(file);
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(LoadedState {
+        bytes,
+        owned,
+        files: retained,
+    })
 }
 
-fn decode_owned(bytes: Option<&[u8]>) -> Result<BTreeMap<Identity, Owned>> {
+type Ownership = BTreeMap<Identity, Owned>;
+
+fn decode_state(bytes: Option<&[u8]>) -> Result<(Ownership, BTreeSet<PathBuf>)> {
     let previous: State = match bytes {
         Some(bytes) => serde_json::from_slice(bytes).map_err(|_| {
             anyhow!("invalid MCP ownership state; refusing to change native configuration")
         })?,
         None => State {
-            version: 1,
+            version: 2,
             entries: Vec::new(),
+            files: Some(BTreeSet::new()),
         },
     };
-    if previous.version != 1 || previous.entries.len() > 16384 {
+    if !matches!(previous.version, 1 | 2)
+        || previous.entries.len() > 16384
+        || (previous.version == 2) != previous.files.is_some()
+    {
         bail!("unsupported or oversized MCP ownership state");
     }
+    let mut files = previous.files.unwrap_or_default();
+    if files.len() > 16384 || files.iter().any(|path| !path.is_absolute()) {
+        bail!("invalid MCP tracked files");
+    }
+    let physical_files = files
+        .iter()
+        .map(|path| crate::filesystem::destination_path(path))
+        .collect::<Result<BTreeSet<_>>>()?;
     let mut owned = BTreeMap::new();
     for mut entry in previous.entries {
         if !entry.identity.path.is_absolute()
@@ -255,16 +358,22 @@ fn decode_owned(bytes: Option<&[u8]>) -> Result<BTreeMap<Identity, Owned>> {
         {
             bail!("invalid MCP ownership identity");
         }
-        entry.identity.path = config::destination_path(&entry.identity.path)?;
+        entry.identity.path = crate::filesystem::destination_path(&entry.identity.path)?;
+        if previous.version == 1 {
+            files.insert(entry.identity.path.clone());
+        } else if !physical_files.contains(&entry.identity.path) {
+            bail!("MCP ownership refers to an untracked file");
+        }
         if owned.insert(entry.identity.clone(), entry).is_some() {
             bail!("duplicate MCP ownership identity");
         }
     }
-    Ok(owned)
+    Ok((owned, files))
 }
 
 fn plan(
     desired: BTreeMap<Identity, (Format, Value)>,
+    mut files: BTreeSet<PathBuf>,
     state_dir: &Path,
     worktree: Option<&WorktreeContext>,
     adopt: bool,
@@ -273,7 +382,9 @@ fn plan(
     let LoadedState {
         bytes: state_bytes,
         owned,
+        files: previous_files,
     } = load_state(state_dir)?;
+    files.extend(previous_files);
     let mut identities: BTreeSet<Identity> = desired.keys().cloned().collect();
     identities.extend(owned.keys().cloned());
     let mut tables = BTreeMap::<PathBuf, BTreeSet<Vec<String>>>::new();
@@ -377,12 +488,32 @@ fn plan(
     if entries.len() > 16384 {
         bail!("MCP ownership exceeds 16384 entries");
     }
+    files.extend(entries.iter().map(|entry| entry.identity.path.clone()));
+    let mut retained = BTreeSet::new();
+    for file in files {
+        let physical = crate::filesystem::destination_path(&file)?;
+        let exists = match std::fs::symlink_metadata(&file) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if exists || updates.iter().any(|update| update.path == physical) {
+            retained.insert(file);
+        }
+    }
+    if retained.len() > 16384 {
+        bail!("MCP tracked files exceed 16384 entries");
+    }
     let state = State {
-        version: 1,
+        version: 2,
         entries,
+        files: Some(retained),
     };
     let after = serde_json::to_vec_pretty(&state)?;
-    if (!state.entries.is_empty() || state_bytes.is_some()) && state_bytes.as_ref() != Some(&after)
+    if (!state.entries.is_empty()
+        || state.files.as_ref().is_some_and(|files| !files.is_empty())
+        || state_bytes.is_some())
+        && state_bytes.as_ref() != Some(&after)
     {
         report.changed = true;
         updates.push(Update {

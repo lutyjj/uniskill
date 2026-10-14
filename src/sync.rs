@@ -104,7 +104,7 @@ fn root_paths(entry: &Path) -> Result<BTreeSet<PathBuf>> {
                 .context("skill root requires a parent")?
                 .join(target)
         };
-        current = config::destination_path(&target)?;
+        current = crate::filesystem::destination_path(&target)?;
     }
     roots.extend(physical);
     Ok(roots)
@@ -131,7 +131,7 @@ fn load_ownership(
         let declared = Path::new(&owner.path);
         let path = match worktree {
             Some(ctx) => ctx.destination(declared)?,
-            None => config::destination_path(declared)?,
+            None => crate::filesystem::destination_path(declared)?,
         };
         if layout.invalidates_storage(&path) {
             bail!(
@@ -148,7 +148,7 @@ fn begin(
     cache: &Path,
     state_dir: &Path,
     worktree: Option<&worktree::WorktreeContext>,
-    reservations: &config::Reservations,
+    reservations: &crate::filesystem::Reservations,
 ) -> Result<SyncInputs> {
     let lock = state::lock(cache)?;
     let mut layout = crate::cache::Layout::resolve(cache)?;
@@ -285,7 +285,7 @@ fn plan_bundle(
             let declared = PathBuf::from(destination.pattern.replace("{name}", &skill));
             let path = match worktree {
                 Some(ctx) => ctx.destination(&declared)?,
-                None => config::destination_path(&declared)?,
+                None => crate::filesystem::destination_path(&declared)?,
             };
             let owner = state::ManagedLink {
                 path: path.to_string_lossy().into_owned(),
@@ -477,7 +477,7 @@ pub fn sync_with_registry(
         registry,
         cache_dir,
         state_dir,
-        &config::Reservations::default(),
+        &crate::filesystem::Reservations::default(),
         4,
         &mut |_| {},
     )
@@ -488,7 +488,7 @@ pub fn sync_with_progress(
     registry: &HashMap<String, harnesses::HarnessDef>,
     cache_dir: &Path,
     state_dir: &Path,
-    reservations: &config::Reservations,
+    reservations: &crate::filesystem::Reservations,
     jobs: usize,
     progress: &mut impl FnMut(fetch_plan::Progress),
 ) -> SyncReport {
@@ -584,7 +584,7 @@ pub fn sync_worktree(
     cache_dir: &Path,
     state_dir: &Path,
     ctx: &worktree::WorktreeContext,
-    reservations: &config::Reservations,
+    reservations: &crate::filesystem::Reservations,
 ) -> SyncReport {
     let SyncInputs {
         _lock,
@@ -770,7 +770,7 @@ mod tests {
                 &registry,
                 &cache,
                 &cache,
-                &config::Reservations::default(),
+                &crate::filesystem::Reservations::default(),
                 1,
                 &mut |event| {
                     if matches!(event, fetch_plan::Progress::Linking { .. }) {
@@ -838,7 +838,7 @@ mod tests {
             &cache,
             &state_dir,
             &ctx,
-            &config::Reservations::default()
+            &crate::filesystem::Reservations::default()
         )
         .summary
         .has_failures());
@@ -859,7 +859,7 @@ mod tests {
                         &cache,
                         &state_dir,
                         &ctx,
-                        &config::Reservations::default(),
+                        &crate::filesystem::Reservations::default(),
                     ))
                     .unwrap();
             });

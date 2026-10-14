@@ -421,83 +421,6 @@ pub(crate) fn resolve_native_path(path: &str, base: &Path) -> anyhow::Result<Str
     .into_owned())
 }
 
-/// Resolve destination aliases through existing parents without following the
-/// final entry, which may be a managed symlink or a foreign file.
-pub(crate) fn destination_path(path: &Path) -> anyhow::Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()?.join(path)
-    };
-    let name = absolute
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("destination requires a file name"))?;
-    let parent = directory_path(absolute.parent().expect("absolute path has parent"))?;
-    Ok(parent.path.join(name))
-}
-
-/// A directory's physical location and every symlink entry used to reach it.
-pub(crate) struct DirectoryPath {
-    pub path: PathBuf,
-    pub aliases: std::collections::BTreeSet<PathBuf>,
-}
-
-/// Filesystem resources another reconciler needs to keep reachable.
-#[derive(Debug, Default)]
-pub(crate) struct Reservations {
-    pub directories: Vec<PathBuf>,
-    pub entries: Vec<PathBuf>,
-}
-
-pub(crate) fn directory_path(path: &Path) -> anyhow::Result<DirectoryPath> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()?.join(path)
-    };
-    let mut parent = PathBuf::new();
-    let mut aliases = std::collections::BTreeSet::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                parent.pop();
-            }
-            std::path::Component::CurDir => {}
-            component => {
-                parent.push(component.as_os_str());
-                match std::fs::symlink_metadata(&parent) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => {
-                        // Validate the complete chain before recursively retaining its entries.
-                        // This also rejects cycles and dangling directory aliases.
-                        parent.canonicalize()?;
-                        aliases.insert(parent.clone());
-                        let target = std::fs::read_link(&parent)?;
-                        let target = if target.is_absolute() {
-                            target
-                        } else {
-                            parent.parent().expect("symlink has parent").join(target)
-                        };
-                        let resolved = directory_path(&target)?;
-                        parent = resolved.path;
-                        aliases.extend(resolved.aliases);
-                    }
-                    Ok(metadata) if !metadata.is_dir() => anyhow::bail!(
-                        "destination parent is not a directory: {}",
-                        parent.display()
-                    ),
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-    }
-    Ok(DirectoryPath {
-        path: parent,
-        aliases,
-    })
-}
-
 pub(crate) fn anchor_bundle_paths(bundle: &mut Bundle, base: &Path) {
     for source in std::iter::once(&mut bundle.source).chain(bundle.skills.values_mut()) {
         if let Some(path) = &mut source.source {
@@ -592,19 +515,6 @@ fn is_local_repo_reference(repo: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn destination_identity_resolves_symlink_parents_before_parent_components() {
-        let temp = tempfile::tempdir().unwrap();
-        let physical = temp.path().join("physical");
-        std::fs::create_dir_all(physical.join("child")).unwrap();
-        let alias = temp.path().join("alias");
-        std::os::unix::fs::symlink(physical.join("child"), &alias).unwrap();
-        assert_eq!(
-            destination_path(&alias.join("../target/demo")).unwrap(),
-            physical.join("target/demo")
-        );
-    }
 
     fn write_temp_toml(content: &str) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();

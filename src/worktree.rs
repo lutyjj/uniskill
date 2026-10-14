@@ -20,7 +20,7 @@ pub struct WorktreeContext {
 impl WorktreeContext {
     /// Check the physical destination after resolving parent aliases.
     pub fn destination(&self, path: &Path) -> anyhow::Result<PathBuf> {
-        let destination = crate::config::destination_path(path)?;
+        let destination = crate::filesystem::destination_path(path)?;
         let root = self.worktree_root.canonicalize()?;
         if !destination.starts_with(&root) || destination == root {
             anyhow::bail!("worktree destination lies outside its checkout");

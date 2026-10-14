@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod fetch_plan;
 mod fetcher;
+mod filesystem;
 mod harnesses;
 mod hook;
 mod linker;

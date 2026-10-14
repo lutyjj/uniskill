@@ -40,6 +40,9 @@ pub fn registry(config: &crate::config::Config) -> anyhow::Result<HashMap<String
                     .into_owned();
             }
         }
+        if !mcp_used {
+            harness.mcp = None;
+        }
         if mcp_used && custom.and_then(|h| h.mcp.as_ref()).is_none() {
             if let Some(target) = &mut harness.mcp {
                 target.path = crate::config::resolve_native_path(&target.path, &base)?;

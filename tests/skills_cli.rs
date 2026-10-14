@@ -216,17 +216,25 @@ fn cache_lifecycle_preserves_mcp_files_and_storage_dependencies() {
                 !f.run(&config, &[]).status.success(),
                 "{location}, storage={storage}"
             );
-            let paths = [
+            let mut paths = vec![
                 f.path("cache/uniskill/state.toml"),
-                f.path("cache/uniskill/mcp/state.json"),
                 f.path("target/demo"),
                 f.path("cache/uniskill/bundles/one/skills/demo/SKILL.md"),
             ];
-            let before = paths.each_ref().map(|p| (snapshot(p), fs::read(p).ok()));
+            if storage {
+                paths.push(f.path("cache/uniskill/mcp/state.json"));
+            }
+            let before = paths
+                .iter()
+                .map(|p| (snapshot(p), fs::read(p).ok()))
+                .collect::<Vec<_>>();
             for _ in 0..2 {
                 assert!(!f.run(&config, &[]).status.success());
                 assert_eq!(
-                    paths.each_ref().map(|p| (snapshot(p), fs::read(p).ok())),
+                    paths
+                        .iter()
+                        .map(|p| (snapshot(p), fs::read(p).ok()))
+                        .collect::<Vec<_>>(),
                     before
                 );
                 assert_eq!(
@@ -1950,4 +1958,153 @@ fn global_hook_installation_preserves_reference_transaction_validation() {
     assert!(!fs::read_to_string(repo.join("validation.log"))
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn native_mcp_targets_cannot_mutate_skill_storage_or_traverse_its_aliases() {
+    for location in [
+        "state.toml",
+        "bundles/.one.previous/native.toml",
+        "bundles/alias/native.toml",
+    ] {
+        let f = Fixture::new();
+        f.skill("source", "one");
+        let config = f.write("config.toml", LOCAL);
+        success(f.run(&config, &[]));
+        if location.contains("alias") {
+            fs::create_dir(f.path("external")).unwrap();
+            std::os::unix::fs::symlink(f.path("external"), f.path("cache/uniskill/bundles/alias"))
+                .unwrap();
+        }
+        let target = format!("cache/uniskill/{location}");
+        f.write("config.toml", format!("{LOCAL}\n[harnesses.native.mcp]\npath='{target}'\nformat='toml'\ntable=['servers']\n[mcp.docs]\nharnesses=['native']\ncommand='echo'\n"));
+        let protected = [f.path("cache/uniskill/state.toml"), f.path("target/demo")];
+        let before = protected
+            .each_ref()
+            .map(|p| (snapshot(p), fs::read(p).ok()));
+        for args in [&["--check-mcp"][..], &["--mcp-only"][..], &[][..], &[][..]] {
+            let output = f.run(&config, args);
+            assert!(!output.status.success(), "{location}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("reserved filesystem storage"));
+            assert_eq!(
+                protected
+                    .each_ref()
+                    .map(|p| (snapshot(p), fs::read(p).ok())),
+                before
+            );
+            assert!(!f.path("cache/uniskill/mcp/state.json").exists());
+            if location != "state.toml" {
+                assert!(!f.path(&target).exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn inactive_declared_mcp_targets_stay_protected_before_cache_publication() {
+    let f = Fixture::new();
+    f.skill("source", "one");
+    let local = LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false");
+    let config = f.write("config.toml", &local);
+    success(f.run(&config, &[]));
+    let native = f.write(
+        "cache/uniskill/bundles/one/native.json",
+        "{\"userSetting\":true}",
+    );
+    f.write("config.toml", format!("{local}\n[harnesses.native.mcp]\npath='cache/uniskill/bundles/one/native.json'\nformat='json'\ntable=['servers']\n"));
+    let before = (
+        fs::read(&native).unwrap(),
+        snapshot(&native),
+        snapshot(&f.path("target/demo")),
+    );
+    for _ in 0..2 {
+        assert!(!f.run(&config, &[]).status.success());
+        assert_eq!(
+            (
+                fs::read(&native).unwrap(),
+                snapshot(&native),
+                snapshot(&f.path("target/demo"))
+            ),
+            before
+        );
+    }
+}
+
+#[test]
+fn worktree_global_mcp_targets_are_checked_before_shared_cache_recovery() {
+    let f = Fixture::new();
+    let linked = linked_project(&f, LOCAL);
+    let native = f.write(
+        "main/.uniskill-cache/bundles/.one.previous/native.json",
+        "{\"userSetting\":true}",
+    );
+    let target = native.to_string_lossy();
+    f.write("main/uniskill.toml", format!("{LOCAL}\n[harnesses.native.mcp]\npath='{target}'\nformat='json'\ntable=['servers']\n[mcp.docs]\nharnesses=['native']\ncommand='echo'\n"));
+    // Global means outside both checkouts, while still part of shared storage.
+    // Alias the shared cache outside the main checkout to expose that boundary.
+    fs::rename(f.path("main/.uniskill-cache"), f.path("shared-cache")).unwrap();
+    std::os::unix::fs::symlink(f.path("shared-cache"), f.path("main/.uniskill-cache")).unwrap();
+    let native = f.path("shared-cache/bundles/.one.previous/native.json");
+    let before = (fs::read(&native).unwrap(), snapshot(&native));
+    for _ in 0..2 {
+        let output = f
+            .command(env!("CARGO_BIN_EXE_uniskill"))
+            .args(["sync", "--worktree"])
+            .current_dir(&linked)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!((fs::read(&native).unwrap(), snapshot(&native)), before);
+        assert!(!linked.join(".uniskill-cache/mcp/state.json").exists());
+    }
+}
+
+#[test]
+fn legacy_and_recovery_native_files_are_checked_before_any_storage_mutation() {
+    for journal in [false, true] {
+        let f = Fixture::new();
+        f.skill("source", "one");
+        let config = f.write("config.toml", LOCAL);
+        success(f.run(&config, &[]));
+        let native = f.write(
+            "cache/uniskill/bundles/.one.previous/native.json",
+            "{\"userSetting\":true}",
+        );
+        let owned = serde_json::json!({"version":1,"entries":[{
+            "identity":{"path":native,"table":["servers"],"name":"docs"},
+            "format":"json","digest":"0".repeat(64)
+        }]})
+        .to_string();
+        let empty = r#"{"version":1,"entries":[]}"#;
+        let state = f.write(
+            "cache/uniskill/mcp/state.json",
+            if journal { empty } else { &owned },
+        );
+        let record = f.path("cache/uniskill/mcp/journal.json");
+        if journal {
+            fs::write(
+                &record,
+                serde_json::json!({"version":1,"updates":[{
+                    "path":state,"before":empty,"after":owned,"mode":384
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let protected = [native, state, f.path("cache/uniskill/state.toml")];
+        let before = protected
+            .each_ref()
+            .map(|p| (fs::read(p).unwrap(), snapshot(p)));
+        let journal_bytes = fs::read(&record).ok();
+        for _ in 0..2 {
+            assert!(!f.run(&config, &[]).status.success());
+            assert_eq!(
+                protected
+                    .each_ref()
+                    .map(|p| (fs::read(p).unwrap(), snapshot(p))),
+                before
+            );
+            assert_eq!(fs::read(&record).ok(), journal_bytes);
+        }
+    }
 }

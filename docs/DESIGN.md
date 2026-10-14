@@ -267,7 +267,9 @@ alias. Multiple harness entries may expose the same directory. Ownership and
 pruning still use entry paths without following the final symlink.
 Missing directories retain reservations from their existing symlink chains.
 
-`cache::Layout` resolves the cache root and bundles storage directory before
+`filesystem.rs` owns physical path resolution and shared resource protection.
+It retains every symlink required to reach a directory and preserves a file's
+final entry for ownership checks. `cache::Layout` resolves the cache root and bundles storage directory before
 deriving publication paths. Staging, worktree readers, recovery, and pruning share
 that layout, so directory aliases retain one storage identity. The layout also
 reserves storage directories and every alias used to reach them, including aliases
@@ -288,14 +290,15 @@ Live sources must sit outside mutable cache storage; use `link = false` to copy
 a cache entry. This prevents publication from removing a directory that its new
 live links depend on.
 
-MCP reports its storage directories and declared native file paths as filesystem
-reservations. CLI orchestration passes those reservations to skill planning,
-including shared MCP storage during worktree sync. The layout protects native
-files and the aliases used to reach them, while allowing skills beside those
-files. Each reconciler owns its paths; `config::Reservations` contains no
-harness or source variants.
-Cache lifecycle mutation checks those reservations too, so publication, recovery,
-and staging cannot remove MCP files or storage placed inside a bundle directory.
+MCP reports its storage directories, configured targets, tracked native files,
+and recovery dependencies as filesystem reservations. CLI orchestration passes
+those reservations to skill planning, including shared main MCP state during
+worktree sync. The layout protects native files and their directory aliases while
+allowing skills beside those files. `filesystem::Reservations` contains no
+harness or source variants. Both reconcilers use the shared protection checks.
+Native MCP files must stay outside skill storage, including paths through aliases
+inside that storage. These checks run before native writes and recovery. Cache
+publication, staging, and recovery also check MCP reservations before mutation.
 
 Applied artifacts and ownership manifests remain unchanged on a converged
 sync. Temporary staging and mutable remote Git metadata can change during

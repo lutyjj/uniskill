@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -7,53 +6,36 @@ use anyhow::Result;
 pub struct Layout {
     root: PathBuf,
     bundles: PathBuf,
-    directories: BTreeSet<PathBuf>,
-    reserved_directories: BTreeSet<PathBuf>,
-    entries: BTreeSet<PathBuf>,
-    aliases: BTreeSet<PathBuf>,
+    storage: crate::filesystem::Protection,
+    dependencies: crate::filesystem::Protection,
+}
+
+/// Namespaces that native config writers must not mutate or depend on.
+pub fn storage(cache: &Path, state: &Path) -> Result<crate::filesystem::Protection> {
+    let mut layout = Layout::resolve(cache)?;
+    layout.reserve_directory(state)?;
+    Ok(layout.storage)
 }
 
 impl Layout {
     pub fn resolve(cache: &Path) -> Result<Self> {
-        let root = crate::config::directory_path(cache)?;
-        let bundles = crate::config::directory_path(&root.path.join("bundles"))?;
-        let mut aliases = root.aliases;
-        aliases.extend(bundles.aliases);
+        let mut storage = crate::filesystem::Protection::default();
+        let root = storage.reserve_directory(cache)?;
+        let bundles = storage.reserve_directory(&root.join("bundles"))?;
         Ok(Self {
-            directories: BTreeSet::from([root.path.clone(), bundles.path.clone()]),
-            reserved_directories: BTreeSet::new(),
-            entries: BTreeSet::new(),
-            root: root.path,
-            bundles: bundles.path,
-            aliases,
+            root,
+            bundles,
+            storage,
+            dependencies: Default::default(),
         })
     }
 
     pub fn reserve_directory(&mut self, path: &Path) -> Result<PathBuf> {
-        let directory = crate::config::directory_path(path)?;
-        self.directories.insert(directory.path.clone());
-        self.aliases.extend(directory.aliases);
-        Ok(directory.path)
+        self.storage.reserve_directory(path)
     }
 
-    pub fn reserve(&mut self, reservations: &crate::config::Reservations) -> Result<()> {
-        for directory in &reservations.directories {
-            let path = self.reserve_directory(directory)?;
-            self.reserved_directories.insert(path);
-        }
-        for entry in &reservations.entries {
-            let parent = crate::config::directory_path(
-                entry
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("reserved entry requires a parent"))?,
-            )?;
-            let name = entry
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("reserved entry requires a file name"))?;
-            self.entries.insert(parent.path.join(name));
-            self.aliases.extend(parent.aliases);
-        }
-        Ok(())
+    pub fn reserve(&mut self, reservations: &crate::filesystem::Reservations) -> Result<()> {
+        self.dependencies.reserve(reservations)
     }
 
     pub fn bundle(&self, name: &str) -> Result<BundlePaths> {
@@ -67,27 +49,16 @@ impl Layout {
     }
 
     pub fn owns(&self, target: &Path) -> Result<bool> {
-        let target = crate::config::destination_path(target)?;
+        let target = crate::filesystem::destination_path(target)?;
         Ok(target.starts_with(&self.root) || target.starts_with(&self.bundles))
     }
 
     pub fn conflicts(&self, entry: &Path) -> bool {
-        self.directories
-            .iter()
-            .chain(self.entries.iter())
-            .chain(self.aliases.iter())
-            .any(|root| entry.starts_with(root) || root.starts_with(entry))
+        self.storage.conflicts(entry) || self.dependencies.conflicts(entry)
     }
 
     pub fn invalidates_storage(&self, entry: &Path) -> bool {
-        self.aliases
-            .iter()
-            .chain(self.entries.iter())
-            .any(|root| root.starts_with(entry))
-            || self
-                .reserved_directories
-                .iter()
-                .any(|root| root.starts_with(entry) || entry.starts_with(root))
+        self.storage.invalidates_alias(entry) || self.dependencies.conflicts(entry)
     }
 }
 
