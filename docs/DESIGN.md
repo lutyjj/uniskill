@@ -117,6 +117,10 @@ by exact ref name to commit IDs before checkout, so filesystem aliases cannot
 select a different revision. An explicit `ref` uses a detached checkout; an
 omitted `ref` follows the clone's upstream branch.
 
+Full commit IDs take precedence over names on initial fetch and cache reuse.
+Use `refs/heads/...` or `refs/tags/...` for a branch or tag whose name looks like
+a full commit ID.
+
 GitHub shorthands (`owner/repo`, `gh:owner/repo`, `github:owner/repo`) resolve
 to SSH URLs. Plain SSH, HTTPS, and local git paths are passed through.
 

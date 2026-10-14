@@ -346,13 +346,13 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
     use sha2::{Digest, Sha256};
     let repo_url = &source.repo;
     let git_ref = source.git_ref.as_deref();
+    let immutable_commit =
+        git_ref.filter(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()));
     let key = format!("{:x}", Sha256::digest(serde_json::to_vec(source)?));
     let repo_dir = base_dir.join("repos").join(key);
 
     if repo_dir.exists() {
-        if let Some(commit) = git_ref
-            .filter(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        {
+        if let Some(commit) = immutable_commit {
             let object = Command::new("git")
                 .arg("-C")
                 .arg(&repo_dir)
@@ -403,7 +403,10 @@ pub(crate) fn fetch_git_repo(source: &GitSource, base_dir: &Path) -> Result<Path
     }
 
     if let Some(requested_ref) = git_ref {
-        let commit = resolve_git_ref(&repo_dir, requested_ref)?;
+        let commit = match immutable_commit {
+            Some(commit) => commit.to_string(),
+            None => resolve_git_ref(&repo_dir, requested_ref)?,
+        };
         run_git(&repo_dir, &["checkout", "--quiet", "--detach", &commit])?;
     } else {
         run_git(&repo_dir, &["merge", "--ff-only", "--quiet", "@{upstream}"])?;
@@ -533,7 +536,7 @@ fn resolve_git_ref(repo_dir: &Path, requested_ref: &str) -> Result<String> {
             .arg(repo_dir)
             .args(["for-each-ref", "--format=%(refname)%09%(objectname)"]),
     )?;
-    let references = String::from_utf8(output.stdout)?;
+    let references = output.stdout;
     let candidates = if let Some(branch) = requested_ref.strip_prefix("refs/heads/") {
         vec![format!("refs/remotes/origin/{branch}")]
     } else if requested_ref.starts_with("refs/") {
@@ -545,13 +548,13 @@ fn resolve_git_ref(repo_dir: &Path, requested_ref: &str) -> Result<String> {
         ]
     };
     let named = candidates.iter().find_map(|candidate| {
-        references.lines().find_map(|line| {
-            let (name, object) = line.split_once('\t')?;
-            (name == candidate).then_some(object)
+        references.split(|byte| *byte == b'\n').find_map(|line| {
+            let separator = line.iter().position(|byte| *byte == b'\t')?;
+            (line[..separator] == *candidate.as_bytes()).then_some(&line[separator + 1..])
         })
     });
     let revision = match named {
-        Some(object) => object,
+        Some(object) => std::str::from_utf8(object)?,
         None if requested_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) => requested_ref,
         None => anyhow::bail!("git ref not found: {requested_ref}"),
     };

@@ -1735,6 +1735,79 @@ fn git_tags_and_commit_ids_keep_their_selected_contents() {
 }
 
 #[test]
+fn unrelated_non_utf8_git_refs_do_not_block_named_sources() {
+    let f = Fixture::new();
+    let origin = f.repo("origin");
+    f.skill("origin", "selected branch");
+    success(f.git(&origin, &["add", "."]));
+    success(f.git(&origin, &["commit", "-qm", "fixture"]));
+    let commit = String::from_utf8(f.git(&origin, &["rev-parse", "HEAD"]).stdout).unwrap();
+    f.write(
+        "origin/.git/packed-refs",
+        [
+            format!("{} refs/heads/unrelated-", commit.trim()).as_bytes(),
+            b"\xff\n",
+        ]
+        .concat(),
+    );
+    let config = f.write(
+        "config.toml",
+        "[harnesses.fixture]\npattern='target/{name}'\n[bundles.one]\nharnesses=['fixture']\n[bundles.one.skills.demo]\nrepo='./origin'\nref='main'\n",
+    );
+    success(f.run(&config, &[]));
+    assert_eq!(
+        fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+        "selected branch"
+    );
+}
+
+#[test]
+fn full_commit_ids_keep_precedence_over_hash_named_refs() {
+    for namespace in ["heads", "tags"] {
+        let f = Fixture::new();
+        let origin = f.repo("origin");
+        f.skill("origin", "pinned commit");
+        success(f.git(&origin, &["add", "."]));
+        success(f.git(&origin, &["commit", "-qm", "pinned"]));
+        let commit = String::from_utf8(f.git(&origin, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        f.skill("origin", "named branch");
+        success(f.git(&origin, &["commit", "-qam", "branch"]));
+        success(f.git(
+            &origin,
+            &["update-ref", &format!("refs/{namespace}/{commit}"), "HEAD"],
+        ));
+        let config = f.write("config.toml", format!(
+        "[harnesses.fixture]\npattern='target/{{name}}'\n[bundles.one]\nharnesses=['fixture']\n[bundles.one.skills.pinned]\nrepo='./origin'\nref={commit:?}\n[bundles.one.skills.named]\nrepo='./origin'\nref='refs/{namespace}/{commit}'\n"
+    ));
+        for expected in ["named branch", "named branch", "updated branch"] {
+            if expected == "updated branch" && namespace == "tags" {
+                break;
+            }
+            if expected == "updated branch" {
+                f.skill("origin", expected);
+                success(f.git(&origin, &["commit", "-qam", "updated branch"]));
+                success(f.git(
+                    &origin,
+                    &["update-ref", &format!("refs/heads/{commit}"), "HEAD"],
+                ));
+            }
+            success(f.run(&config, &[]));
+            assert_eq!(
+                fs::read_to_string(f.path("target/pinned/SKILL.md")).unwrap(),
+                "pinned commit"
+            );
+            assert_eq!(
+                fs::read_to_string(f.path("target/named/SKILL.md")).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn competing_skill_routes_fail_without_replacing_the_installed_link() {
     let f = Fixture::new();
     f.skill("source", "one");
