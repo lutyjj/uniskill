@@ -257,13 +257,22 @@ first sync its removal of the skill, then sync the new owner. Nested destination
 require the old root to be pruned before applying the new route, even within
 one bundle.
 
-Overlap checks include each link entry, the directory it exposes, and the
-directory its staged skill will expose after publication. Live skills expose
-their source directories; staged copies expose their published cache paths.
+Overlap checks include each harness entry, its full symlink chain, its publication
+directory, and the directory the skill exposes. Every skill reserves its future
+cache entry before publication. Live skills also expose their source directories;
+staged copies expose their published cache paths. Publication waits for installed
+harness claims at or below that directory to retire.
 Resolved destination ancestors must not enter those roots, even through another
 alias. Multiple harness entries may expose the same directory. Ownership and
 pruning still use entry paths without following the final symlink.
 Missing directories retain reservations from their existing symlink chains.
+
+`cache::Layout` resolves the cache root and bundles storage directory before
+deriving publication paths. Staging, worktree readers, recovery, and pruning share
+that layout, so directory aliases retain one storage identity. Ownership checks
+preserve the final skill entry when it links to a live source. Keeping layout
+separate from materialization lets ownership checks use storage identity without
+depending on source-fetching code.
 
 Applied artifacts and ownership manifests remain unchanged on a converged
 sync. Temporary staging and mutable remote Git metadata can change during

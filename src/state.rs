@@ -80,22 +80,19 @@ impl Manifest {
 /// Anything that is not a symlink, or points elsewhere, is left alone.
 pub fn is_managed_symlink(path: &Path, cache_dir: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            match fs::read_link(path) {
-                Ok(target) => {
-                    let target = if target.is_absolute() {
-                        target
-                    } else {
-                        path.parent()
-                            .context("managed link requires a parent")?
-                            .join(target)
-                    };
-                    Ok(crate::config::destination_path(&target)?
-                        .starts_with(cache_dir.canonicalize()?))
-                }
-                Err(error) => Err(error.into()),
+        Ok(meta) if meta.file_type().is_symlink() => match fs::read_link(path) {
+            Ok(target) => {
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    path.parent()
+                        .context("managed link requires a parent")?
+                        .join(target)
+                };
+                crate::cache::Layout::resolve(cache_dir)?.owns(&target)
             }
-        }
+            Err(error) => Err(error.into()),
+        },
         Ok(_) => Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),

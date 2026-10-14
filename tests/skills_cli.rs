@@ -55,6 +55,13 @@ impl Fixture {
         self.write(&format!("{name}/SKILL.md"), content);
     }
 
+    fn alias_bundle_storage(&self) {
+        fs::create_dir_all(self.path("cache/uniskill")).unwrap();
+        fs::create_dir(self.path("store")).unwrap();
+        std::os::unix::fs::symlink(self.path("store"), self.path("cache/uniskill/bundles"))
+            .unwrap();
+    }
+
     fn git(&self, dir: &Path, args: &[&str]) -> Output {
         self.command("git")
             .arg("-C")
@@ -149,30 +156,207 @@ fn aliases_into_installed_skills_cannot_write_below_their_exposed_roots() {
 }
 
 #[test]
-fn planned_skill_footprints_protect_live_sources_and_future_copied_caches() {
+fn planned_skill_footprints_protect_sources_and_all_future_cache_entries() {
+    for aliased in [false, true] {
+        for kind in ["live-source", "live-cache", "copied-cache"] {
+            let f = Fixture::new();
+            f.skill("source", "one");
+            f.skill("other", "two");
+            std::os::unix::fs::symlink(f.path("source"), f.path("alias")).unwrap();
+            if aliased {
+                f.alias_bundle_storage();
+            }
+            let initial = if kind == "copied-cache" {
+                LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false")
+            } else {
+                LOCAL.to_owned()
+            };
+            let pattern = if kind == "live-source" {
+                "alias/{name}"
+            } else {
+                "cache/uniskill/bundles/one/skills/demo/{name}"
+            };
+            let config = f.write("config.toml", format!("{initial}\n[harnesses.nested]\npattern='{pattern}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n"));
+            for _ in 0..2 {
+                let output = f.run(&config, &[]);
+                assert!(!output.status.success(), "{kind}, alias={aliased}");
+                assert!(String::from_utf8_lossy(&output.stdout).contains("overlap"));
+                assert!(!f.path("source/extra").exists());
+                assert!(!f.path("target/demo").exists());
+                assert!(!f.path("cache/uniskill/bundles/one").exists());
+                assert!(!f.path("cache/uniskill/bundles/two").exists());
+                assert!(!f.path("cache/uniskill/state.toml").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn aliased_bundle_storage_supports_install_reapply_and_owned_pruning() {
     for copied in [false, true] {
         let f = Fixture::new();
         f.skill("source", "one");
-        f.skill("other", "two");
-        std::os::unix::fs::symlink(f.path("source"), f.path("alias")).unwrap();
-        let (initial, pattern) = if copied {
-            (
-                LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false"),
-                "cache/uniskill/bundles/one/skills/demo/{name}",
-            )
-        } else {
-            (LOCAL.to_owned(), "alias/{name}")
-        };
-        let config = f.write("config.toml", format!("{initial}\n[harnesses.nested]\npattern='{pattern}'\n[bundles.two]\nharnesses=['nested']\n[bundles.two.skills.extra]\nsource='other'\n"));
-        for _ in 0..2 {
-            let output = f.run(&config, &[]);
-            assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stdout).contains("overlap"));
-            assert!(!f.path("source/extra").exists());
-            assert!(!f.path("target/demo").exists());
-            assert!(!f.path("cache/uniskill/bundles/one").exists());
-            assert!(!f.path("cache/uniskill/bundles/two").exists());
-            assert!(!f.path("cache/uniskill/state.toml").exists());
+        f.alias_bundle_storage();
+        f.write("store/manual", "preserve");
+        let config = f.write(
+            "config.toml",
+            if copied {
+                LOCAL.replace("[bundles.one]", "[bundles.one]\nlink=false")
+            } else {
+                LOCAL.to_owned()
+            },
+        );
+        success(f.run(&config, &[]));
+        let paths = [
+            "target/demo",
+            "cache/uniskill/state.toml",
+            "store/one",
+            "store/one/skills/demo",
+            "cache/uniskill/bundles",
+        ];
+        let before = paths.map(|p| snapshot(&f.path(p)));
+        success(f.run(&config, &[]));
+        assert_eq!(paths.map(|p| snapshot(&f.path(p))), before);
+        f.write("config.toml", "");
+        success(f.run(&config, &[]));
+        assert!(!f.path("target/demo").is_symlink());
+        assert_eq!(
+            fs::read_to_string(f.path("source/SKILL.md")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(f.path("store/manual")).unwrap(),
+            "preserve"
+        );
+        assert!(f.path("cache/uniskill/bundles").is_symlink());
+    }
+}
+
+#[test]
+fn published_cache_entries_cannot_be_replaced_by_other_skill_routes() {
+    for kind in ["fresh", "installed", "failed-owner"] {
+        for aliased in [false, true] {
+            let f = Fixture::new();
+            f.skill("source", "one");
+            f.skill("other", "two");
+            if aliased {
+                f.alias_bundle_storage();
+            }
+            let config = f.write("config.toml", LOCAL);
+            let state = f.path("cache/uniskill/state.toml");
+            if kind != "fresh" {
+                success(f.run(&config, &[]));
+            }
+            let original = fs::read(&state).ok();
+            let link = f.path("target/demo");
+            let before = fs::symlink_metadata(&link).ok().map(|_| snapshot(&link));
+            let owner = if kind == "failed-owner" {
+                LOCAL.replace("harnesses = [\"fixture\"]", "harnesses=['missing']")
+            } else {
+                LOCAL.to_owned()
+            };
+            f.write("config.toml", owner + "\n[harnesses.cache-entry]\npattern='cache/uniskill/bundles/one/skills/{name}'\n[bundles.two]\nharnesses=['cache-entry']\n[bundles.two.skills.demo]\nsource='other'\n");
+            for _ in 0..2 {
+                let output = f.run(&config, &[]);
+                assert!(!output.status.success(), "{kind}, alias={aliased}");
+                assert!(String::from_utf8_lossy(&output.stdout).contains("overlap"));
+                assert_eq!(fs::read(&state).ok(), original);
+                assert_eq!(
+                    fs::symlink_metadata(&link).ok().map(|_| snapshot(&link)),
+                    before
+                );
+                assert!(!f.path("cache/uniskill/bundles/two").exists());
+                if kind == "fresh" {
+                    assert!(!f.path("cache/uniskill/bundles/one").exists());
+                } else {
+                    assert_eq!(fs::read_to_string(link.join("SKILL.md")).unwrap(), "one");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_harness_cannot_replace_its_own_published_cache_entry() {
+    for aliased in [false, true] {
+        let f = Fixture::new();
+        f.skill("source", "one");
+        if aliased {
+            f.alias_bundle_storage();
+        }
+        let config = f.write(
+            "config.toml",
+            LOCAL.replace("target/{name}", "cache/uniskill/bundles/one/skills/{name}"),
+        );
+        assert!(!f.run(&config, &[]).status.success());
+        assert!(!f.path("cache/uniskill/bundles/one").exists());
+        assert!(!f.path("cache/uniskill/state.toml").exists());
+    }
+}
+
+#[test]
+fn publication_preserves_legacy_harness_claims_inside_bundle_storage() {
+    for location in ["root", "descendant"] {
+        for retained in [false, true] {
+            let f = Fixture::new();
+            f.skill("source", "one");
+            f.skill("other", "two");
+            let two =
+                "[bundles.two]\nharnesses=['fixture']\n[bundles.two.skills.demo]\nsource='other'\n";
+            let config = f.write(
+                "config.toml",
+                format!("[harnesses.fixture]\npattern='retired/{{name}}'\n{two}"),
+            );
+            success(f.run(&config, &[]));
+            let old = f.path(if location == "root" {
+                "cache/uniskill/bundles/one"
+            } else {
+                "cache/uniskill/bundles/one/skills/retired"
+            });
+            fs::create_dir_all(old.parent().unwrap()).unwrap();
+            fs::rename(f.path("retired/demo"), &old).unwrap();
+            let state = f.path("cache/uniskill/state.toml");
+            let body = fs::read_to_string(&state).unwrap().replace(
+                &format!("{:?}", f.path("retired/demo").to_string_lossy()),
+                &format!("{:?}", old.to_string_lossy()),
+            );
+            fs::write(&state, body).unwrap();
+            let before = (
+                snapshot(&old),
+                fs::read_link(&old).unwrap(),
+                fs::read(&state).unwrap(),
+            );
+            let owner = if retained {
+                two.replace("harnesses=['fixture']", "harnesses=['missing']")
+            } else {
+                String::new()
+            };
+            f.write("config.toml", format!("{LOCAL}\n{owner}"));
+            for _ in 0..2 {
+                assert!(!f.run(&config, &[]).status.success());
+                assert!(!f.path("target/demo").exists());
+                if retained {
+                    assert_eq!(
+                        (
+                            snapshot(&old),
+                            fs::read_link(&old).unwrap(),
+                            fs::read(&state).unwrap()
+                        ),
+                        before
+                    );
+                    assert_eq!(fs::read_to_string(old.join("SKILL.md")).unwrap(), "two");
+                } else {
+                    break;
+                }
+            }
+            if !retained {
+                assert!(!old.is_symlink());
+                success(f.run(&config, &[]));
+                assert_eq!(
+                    fs::read_to_string(f.path("target/demo/SKILL.md")).unwrap(),
+                    "one"
+                );
+            }
         }
     }
 }
@@ -624,6 +808,52 @@ fn worktree_failed_bundles_keep_their_destinations_reserved() {
             fs::read(&state).unwrap()
         ),
         before
+    );
+}
+
+#[test]
+fn worktrees_consume_and_prune_links_from_aliased_bundle_storage() {
+    let f = Fixture::new();
+    let linked = linked_project(&f, LOCAL);
+    fs::rename(f.path("main/.uniskill-cache/bundles"), f.path("store")).unwrap();
+    std::os::unix::fs::symlink(f.path("store"), f.path("main/.uniskill-cache/bundles")).unwrap();
+    let main_before = (
+        snapshot(&f.path("main/target/demo")),
+        fs::read(f.path("main/.uniskill-cache/state.toml")).unwrap(),
+    );
+    let run = || {
+        f.command(env!("CARGO_BIN_EXE_uniskill"))
+            .args(["sync", "--worktree"])
+            .current_dir(&linked)
+            .output()
+            .unwrap()
+    };
+    success(run());
+    let before = (
+        snapshot(&linked.join("target/demo")),
+        snapshot(&linked.join(".uniskill-cache/state.toml")),
+    );
+    success(run());
+    assert_eq!(
+        (
+            snapshot(&linked.join("target/demo")),
+            snapshot(&linked.join(".uniskill-cache/state.toml"))
+        ),
+        before
+    );
+    f.write("main/uniskill.toml", "");
+    success(run());
+    assert!(!linked.join("target/demo").is_symlink());
+    assert_eq!(
+        (
+            snapshot(&f.path("main/target/demo")),
+            fs::read(f.path("main/.uniskill-cache/state.toml")).unwrap()
+        ),
+        main_before
+    );
+    assert_eq!(
+        fs::read_to_string(f.path("main/source/SKILL.md")).unwrap(),
+        "one"
     );
 }
 

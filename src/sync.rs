@@ -73,23 +73,27 @@ fn state_failure(error: anyhow::Error) -> SyncReport {
 
 /// Preserve the mutable entry and the directory it exposes as separate roots.
 fn root_paths(entry: &Path) -> Result<BTreeSet<PathBuf>> {
+    let physical = match entry.canonicalize() {
+        Ok(directory) => Some(directory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let mut roots = BTreeSet::new();
     let mut current = entry.to_path_buf();
     loop {
         if !roots.insert(current.clone()) {
             bail!("cyclic skill root");
         }
-        match current.canonicalize() {
-            Ok(directory) => {
-                roots.insert(directory);
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
         let target = match std::fs::read_link(&current) {
             Ok(target) => target,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                break
+            }
             Err(error) => return Err(error.into()),
         };
         let target = if target.is_absolute() {
@@ -102,6 +106,7 @@ fn root_paths(entry: &Path) -> Result<BTreeSet<PathBuf>> {
         };
         current = config::destination_path(&target)?;
     }
+    roots.extend(physical);
     Ok(roots)
 }
 
@@ -225,7 +230,10 @@ fn plan_bundle(
                 harness: destination.harness.clone(),
                 bundle: name.into(),
             };
+            let source = published.join("skills").join(&skill);
             let mut roots = root_paths(&path)?;
+            roots.insert(published.to_path_buf());
+            roots.insert(source.clone());
             let directory = entry.path().canonicalize()?;
             roots.insert(match directory.strip_prefix(skills) {
                 Ok(relative) => published.join("skills").join(relative),
@@ -234,7 +242,7 @@ fn plan_bundle(
             planned.push((
                 path,
                 Route {
-                    source: published.join("skills").join(&skill),
+                    source,
                     owner,
                     label: destination.label.clone(),
                     roots,
@@ -256,7 +264,7 @@ fn select_routes(
     report: &mut SyncReport,
 ) -> Result<BTreeMap<PathBuf, Route>> {
     let mut descendants = BTreeMap::<PathBuf, BTreeSet<String>>::new();
-    let mut root_owners = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    let mut dependencies = BTreeMap::<PathBuf, BTreeSet<String>>::new();
     for (path, candidates) in &routes {
         for route in candidates {
             for parent in path.ancestors().skip(1) {
@@ -266,10 +274,12 @@ fn select_routes(
                     .insert(route.owner.bundle.clone());
             }
             for root in &route.roots {
-                root_owners
-                    .entry(root.clone())
-                    .or_default()
-                    .insert(route.owner.bundle.clone());
+                if root != path {
+                    dependencies
+                        .entry(root.clone())
+                        .or_default()
+                        .insert(route.owner.bundle.clone());
+                }
             }
         }
     }
@@ -311,7 +321,7 @@ fn select_routes(
     }
     for old in &previous.links {
         let entry = Path::new(&old.path);
-        let mut blocked = BTreeSet::new();
+        let mut blocked = dependencies.get(entry).cloned().unwrap_or_default();
         for root in root_paths(entry)? {
             blocked.extend(descendants.get(&root).into_iter().flatten().cloned());
             if let Some(at_root) = routes.get(&root) {
@@ -328,7 +338,10 @@ fn select_routes(
             }
         }
         for parent in entry.ancestors().skip(1) {
-            blocked.extend(root_owners.get(parent).into_iter().flatten().cloned());
+            blocked.extend(dependencies.get(parent).into_iter().flatten().cloned());
+            if let Some(candidates) = routes.get(parent) {
+                blocked.extend(candidates.iter().map(|r| r.owner.bundle.clone()));
+            }
         }
         for bundle in blocked {
             if !failed.contains(&bundle) {
@@ -409,8 +422,9 @@ pub fn sync_with_progress(
     let mut eligible = HashMap::new();
     let mut targets = BTreeMap::new();
     for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
-        let checked = config::validate_component(name)
-            .and_then(|_| fetcher::recover_bundle_cache(&cache.join("bundles").join(name)))
+        let checked = crate::cache::Layout::resolve(&cache)
+            .and_then(|layout| layout.bundle(name))
+            .and_then(|root| fetcher::recover_bundle_cache(&root))
             .and_then(|_| destinations(bundle, registry, None));
         match checked {
             Ok(destinations) => {
@@ -487,10 +501,10 @@ pub fn sync_worktree(
     let mut failed = BTreeSet::new();
     let mut routes = Routes::new();
     for (name, bundle) in bundles.iter().collect::<BTreeMap<_, _>>() {
-        let published = cache.join("bundles").join(name);
-        let result = config::validate_component(name)
-            .and_then(|_| destinations(bundle, registry, Some(ctx)))
-            .and_then(|destinations| {
+        let result = crate::cache::Layout::resolve(&cache)
+            .and_then(|layout| layout.bundle(name))
+            .and_then(|published| {
+                let destinations = destinations(bundle, registry, Some(ctx))?;
                 if destinations.is_empty() {
                     return Ok(());
                 }

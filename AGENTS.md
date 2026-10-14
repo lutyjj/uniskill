@@ -36,6 +36,7 @@ Modules own narrow jobs:
 | --- | --- |
 | `cli.rs` | CLI parsing, config discovery, report printing, exit codes |
 | `config.rs` | TOML shapes, source validation, env var and path resolution |
+| `cache.rs` | Physical storage roots shared by cache publication and link ownership |
 | `fetcher.rs` | Materializing local, URL, and git sources into the bundle cache |
 | `harnesses.rs` | Registry loading and configurable skill/MCP destinations |
 | `fetch_plan.rs` | Deduplicated, bounded remote downloads and progress |

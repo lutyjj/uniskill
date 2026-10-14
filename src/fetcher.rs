@@ -56,7 +56,7 @@ pub fn stage_bundle(
     prepared: &crate::fetch_plan::Prepared,
 ) -> Result<StagedBundle> {
     validate_bundle(bundle)?;
-    let bundle_root = cache_dir.join("bundles").join(bundle_name);
+    let bundle_root = crate::cache::Layout::resolve(cache_dir)?.bundle(bundle_name)?;
     recover_bundle_cache(&bundle_root)?;
     let staging_root = sibling_cache_path(&bundle_root, "staging")?;
     let skills_dir = staging_root.join("skills");
